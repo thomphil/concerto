@@ -1,0 +1,6 @@
+[package]
+name = "concerto-backend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

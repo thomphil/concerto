@@ -1,0 +1,6 @@
+[package]
+name = "concerto-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
