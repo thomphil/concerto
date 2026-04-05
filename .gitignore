@@ -26,3 +26,14 @@ SPRINT-2-PLAN.md
 
 # Local bench rig artifacts (tarballs are too big to commit; summaries go in docs/)
 /bench-artifacts/
+
+# Python build / test caches (concerto-bench rig under tools/bench/)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+tools/bench/build/
+tools/bench/dist/
