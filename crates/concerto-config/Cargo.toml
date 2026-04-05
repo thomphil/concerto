@@ -2,5 +2,12 @@
 name = "concerto-config"
 version.workspace = true
 edition.workspace = true
+description = "TOML configuration parsing for Concerto."
 
 [dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+bytesize = { workspace = true }
+tracing = { workspace = true }
+concerto-core = { workspace = true }
