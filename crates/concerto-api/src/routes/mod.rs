@@ -2,6 +2,7 @@
 
 pub mod chat;
 pub mod health;
+pub mod metrics;
 pub mod models;
 pub mod status;
 
@@ -22,6 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::liveness))
         .route("/ready", get(health::readiness))
         .route("/status", get(status::status))
+        .route("/metrics", get(metrics::scrape))
         .route("/v1/models", get(models::list))
         .route("/v1/chat/completions", post(chat::completions))
         .with_state(state)

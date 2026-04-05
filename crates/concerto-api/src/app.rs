@@ -7,6 +7,7 @@ use concerto_backend::{BackendHandle, BackendManager};
 use concerto_config::ConcertoConfig;
 use concerto_core::{ClusterState, ModelId};
 use concerto_gpu::GpuMonitor;
+use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::{broadcast, Mutex, Notify};
 
 /// Outcome of a single model-load operation, broadcast to every waiter.
@@ -49,4 +50,8 @@ pub struct AppState {
     pub backends: Arc<Mutex<HashMap<ModelId, BackendHandle>>>,
     /// Notifier used to signal graceful shutdown to background tasks.
     pub shutdown: Arc<Notify>,
+    /// Prometheus handle used by the `/metrics` endpoint to render the
+    /// current metric snapshot. Installed once per process via
+    /// [`crate::metrics::install`]; cloned cheaply into every [`AppState`].
+    pub prometheus: Arc<PrometheusHandle>,
 }

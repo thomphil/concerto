@@ -18,21 +18,48 @@
 //!   the `state.backends` bookkeeping map is always kept in sync with the
 //!   cluster snapshot.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use concerto_core::{route_request, GpuId, ModelId, RoutingDecision};
+use metrics::{counter, histogram};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::app::{AppState, LoadResult};
 use crate::error::ApiError;
+use crate::metrics::{
+    BACKEND_LAUNCHES_TOTAL, EVICTION_TOTAL, MODEL_LOAD_DURATION_SECONDS, ROUTING_DECISION_SECONDS,
+};
+
+/// How the orchestrator satisfied a request. Used to label the
+/// `concerto_requests_total` metric at the chat handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingKind {
+    /// Served from a backend that was already warm.
+    Loaded,
+    /// Required a cold-start (launcher or dedup subscriber path). The
+    /// caller-visible outcome is identical; only the orchestrator work
+    /// differs.
+    LoadedAfterLoad,
+}
+
+impl RoutingKind {
+    /// Prometheus label value for the `decision` dimension.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RoutingKind::Loaded => "loaded",
+            RoutingKind::LoadedAfterLoad => "loaded_after_load",
+        }
+    }
+}
 
 /// Resolved dispatch target for an incoming request.
 #[derive(Debug, Clone)]
 pub struct BackendTarget {
     pub gpu_id: GpuId,
     pub port: u16,
+    pub kind: RoutingKind,
 }
 
 /// Route an incoming request and make the target backend ready.
@@ -48,17 +75,28 @@ pub async fn route_and_dispatch(
     let routing_config = state.config.routing_config();
 
     // --- 1. Make the routing decision under a short critical section. -----
+    //
+    // Time only the pure-logic phase (lock acquire + `route_request`). The
+    // cold-start / launch phase is measured separately by
+    // `concerto_model_load_duration_seconds` so dashboards can see the two
+    // independently.
+    let decision_start = Instant::now();
     let decision = {
         let cluster = state.cluster.lock().await;
         route_request(&model_id, &cluster, &routing_config)
     };
+    histogram!(ROUTING_DECISION_SECONDS).record(decision_start.elapsed().as_secs_f64());
 
     match decision {
         RoutingDecision::RouteToLoaded { gpu_id, port } => {
             // Already loaded. Bump bookkeeping and return.
             touch_loaded_model(state, &model_id).await;
             debug!(model = %model_id, %gpu_id, port, "serving from warm backend");
-            Ok(BackendTarget { gpu_id, port })
+            Ok(BackendTarget {
+                gpu_id,
+                port,
+                kind: RoutingKind::Loaded,
+            })
         }
         RoutingDecision::Reject { reason } => {
             warn!(model = %model_id, reason, "routing rejected");
@@ -119,6 +157,7 @@ async fn cold_start(
                 Ok(Ok(LoadResult::Ok(handle))) => Ok(BackendTarget {
                     gpu_id: handle.gpu_id,
                     port: handle.port,
+                    kind: RoutingKind::LoadedAfterLoad,
                 }),
                 Ok(Ok(LoadResult::Err(reason))) => Err(ApiError::BackendCrashed(reason)),
                 Ok(Err(_)) => Err(ApiError::BackendCrashed(
@@ -132,7 +171,14 @@ async fn cold_start(
             // - broadcast the outcome to any subscribers
             // - remove the dedup sender
             // - ensure cluster/backends bookkeeping is consistent
+            //
+            // Only the launcher path records the model-load histogram;
+            // subscribers wait on the same event but double-counting would
+            // skew p95/p99 under concurrent requests for the same cold
+            // model.
+            let launch_start = Instant::now();
             let outcome = do_launch(state, model_id, gpu_id, evict).await;
+            histogram!(MODEL_LOAD_DURATION_SECONDS).record(launch_start.elapsed().as_secs_f64());
             finalise_launch(state, model_id, &outcome).await;
             outcome
         }
@@ -169,6 +215,7 @@ async fn do_launch(
             }
         }
         remove_loaded_model(state, victim).await;
+        counter!(EVICTION_TOTAL).increment(1);
     }
 
     // --- 4. Look up the model spec we're about to launch. ----------------
@@ -218,10 +265,12 @@ async fn do_launch(
         .await
         .insert(model_id.clone(), handle.clone());
 
+    counter!(BACKEND_LAUNCHES_TOTAL).increment(1);
     info!(model = %model_id, pid = handle.pid, port = handle.port, "backend ready");
     Ok(BackendTarget {
         gpu_id: handle.gpu_id,
         port: handle.port,
+        kind: RoutingKind::LoadedAfterLoad,
     })
 }
 

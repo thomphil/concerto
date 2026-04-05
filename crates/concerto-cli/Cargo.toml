@@ -20,3 +20,10 @@ concerto-config = { workspace = true }
 concerto-core = { workspace = true }
 concerto-gpu = { workspace = true }
 concerto-backend = { workspace = true }
+
+[features]
+# Enable real NVML-backed GPU telemetry. Forwards to `concerto-gpu/nvml`,
+# which itself gates its NVML bindings on `target_os = "linux"` — so
+# cross-platform builds still compile with this feature enabled; it just
+# becomes a no-op off Linux.
+nvml = ["concerto-gpu/nvml"]
