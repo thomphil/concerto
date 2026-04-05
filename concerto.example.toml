@@ -14,6 +14,7 @@ weight_path = "/models/qwen2.5-7b"
 vram_required = "14GB"
 engine = "vllm"
 engine_args = ["--dtype", "float16", "--max-model-len", "4096"]
+# pin = true  # uncomment to protect this model from being evicted
 
 [[models]]
 id = "phi-3-mini"

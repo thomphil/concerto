@@ -17,6 +17,7 @@ fn spec(id: &str) -> ModelSpec {
         vram_required: ByteSize::gb(4),
         engine: EngineType::Mock,
         engine_args: vec![],
+        pin: false,
     }
 }
 

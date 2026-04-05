@@ -18,6 +18,7 @@ fn spec_with_engine(engine: EngineType, args: Vec<&str>) -> ModelSpec {
         vram_required: ByteSize::gb(8),
         engine,
         engine_args: args.into_iter().map(String::from).collect(),
+        pin: false,
     }
 }
 

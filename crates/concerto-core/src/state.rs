@@ -166,6 +166,7 @@ pub mod test_helpers {
             vram_required: ByteSize::gb(vram_gb),
             engine: EngineType::Mock,
             engine_args: vec![],
+            pin: false,
         };
         (model_id, spec)
     }
