@@ -300,6 +300,25 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "concerto-api"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bytesize",
+ "chrono",
+ "concerto-backend",
+ "concerto-config",
+ "concerto-core",
+ "concerto-gpu",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
 
 [[package]]
 name = "concerto-backend"
@@ -319,6 +338,20 @@ dependencies = [
 [[package]]
 name = "concerto-cli"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytesize",
+ "clap",
+ "concerto-api",
+ "concerto-backend",
+ "concerto-config",
+ "concerto-core",
+ "concerto-gpu",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "concerto-config"
@@ -1983,6 +2016,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

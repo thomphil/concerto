@@ -3,4 +3,20 @@ name = "concerto-cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "concerto"
+path = "src/main.rs"
+
 [dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bytesize = { workspace = true }
+concerto-api = { workspace = true }
+concerto-config = { workspace = true }
+concerto-core = { workspace = true }
+concerto-gpu = { workspace = true }
+concerto-backend = { workspace = true }

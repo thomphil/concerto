@@ -34,6 +34,28 @@ pub struct RoutingSection {
     /// VRAM headroom to reserve on every GPU (for KV cache growth, etc.).
     #[serde(default = "default_vram_headroom")]
     pub vram_headroom: ByteSize,
+
+    /// Grace period (seconds) given to an in-flight stream before a backend
+    /// targeted for eviction is forcibly stopped.
+    #[serde(default = "default_eviction_grace_period_secs")]
+    pub eviction_grace_period_secs: u64,
+
+    /// Lower bound of the TCP port range used to allocate backend listen
+    /// ports. On startup, Concerto scans this range for orphan processes and
+    /// kills them with a warning before starting.
+    #[serde(default = "default_port_range_start")]
+    pub port_range_start: u16,
+
+    /// Exclusive upper bound of the TCP port range used for backend listen
+    /// ports. Must be strictly greater than `port_range_start`.
+    #[serde(default = "default_port_range_end")]
+    pub port_range_end: u16,
+
+    /// Per-request timeout applied as an axum middleware. `0` disables the
+    /// timeout (intended default for v0.1 — the TimeoutLayer ships with
+    /// Sprint 3, the config field is here so users can prepare).
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 }
 
 impl Default for RoutingSection {
@@ -45,6 +67,10 @@ impl Default for RoutingSection {
             max_healthy_temperature: default_max_healthy_temperature(),
             max_degraded_temperature: default_max_degraded_temperature(),
             vram_headroom: default_vram_headroom(),
+            eviction_grace_period_secs: default_eviction_grace_period_secs(),
+            port_range_start: default_port_range_start(),
+            port_range_end: default_port_range_end(),
+            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }
@@ -71,4 +97,20 @@ fn default_max_degraded_temperature() -> u32 {
 
 fn default_vram_headroom() -> ByteSize {
     ByteSize::gb(1)
+}
+
+fn default_eviction_grace_period_secs() -> u64 {
+    30
+}
+
+fn default_port_range_start() -> u16 {
+    8100
+}
+
+fn default_port_range_end() -> u16 {
+    9000
+}
+
+fn default_request_timeout_secs() -> u64 {
+    0
 }

@@ -77,6 +77,13 @@ impl ConcertoConfig {
             }
         }
 
+        if self.routing.port_range_start >= self.routing.port_range_end {
+            return Err(ConfigError::InvalidPortRange {
+                start: self.routing.port_range_start,
+                end: self.routing.port_range_end,
+            });
+        }
+
         Ok(())
     }
 
