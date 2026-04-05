@@ -393,6 +393,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "concerto-scenarios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytesize",
+ "concerto-api",
+ "concerto-backend",
+ "concerto-config",
+ "concerto-core",
+ "concerto-gpu",
+ "futures",
+ "mock-inference-backend",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

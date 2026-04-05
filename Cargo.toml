@@ -8,6 +8,7 @@ members = [
     "crates/concerto-config",
     "crates/concerto-cli",
     "tests/mock_backend",
+    "tests/scenarios",
 ]
 
 [workspace.package]
