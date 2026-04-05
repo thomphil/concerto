@@ -2,5 +2,15 @@
 name = "concerto-core"
 version.workspace = true
 edition.workspace = true
+description = "Pure routing logic, eviction policies, and memory accounting for Concerto. Zero IO dependencies."
 
 [dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+bytesize = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
