@@ -10,9 +10,11 @@ use std::time::Duration;
 
 use concerto_backend::BackendHandle;
 use concerto_core::ModelId;
+use metrics::counter;
 use tracing::{info, warn};
 
 use crate::app::AppState;
+use crate::metrics::BACKEND_HEALTH_CHECK_FAILURES_TOTAL;
 
 /// Run the health loop until shutdown is signalled via `state.shutdown`.
 pub async fn run(state: AppState) {
@@ -39,6 +41,7 @@ pub async fn run(state: AppState) {
         for (model_id, handle) in snapshot {
             if !state.backend.health_check(&handle).await {
                 warn!(%model_id, pid = handle.pid, port = handle.port, "backend unhealthy; dropping");
+                counter!(BACKEND_HEALTH_CHECK_FAILURES_TOTAL).increment(1);
                 state.backends.lock().await.remove(&model_id);
                 let mut cluster = state.cluster.lock().await;
                 for gpu in &mut cluster.gpus {

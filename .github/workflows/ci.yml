@@ -29,8 +29,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (nvml feature)
+        # Verifies the NVML code path compiles against the same warnings
+        # budget. The `nvml` feature's NVML-linking code is itself gated on
+        # `target_os = "linux"` inside `concerto-gpu`, so the GitHub
+        # ubuntu-latest runner (which has no NVIDIA driver) still
+        # compiles — the feature is a no-op at runtime but the wiring must
+        # stay clean.
+        run: cargo clippy --all-targets -p concerto-cli --features nvml -- -D warnings
+
       - name: Build
         run: cargo build --all
+
+      - name: Build (nvml feature)
+        run: cargo build -p concerto-cli --features nvml
 
       - name: Test
         run: cargo test --all

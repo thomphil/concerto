@@ -12,6 +12,7 @@
 pub mod app;
 pub mod error;
 pub mod health_loop;
+pub mod metrics;
 pub mod orchestrator;
 pub mod routes;
 pub mod server;

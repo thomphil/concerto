@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use bytesize::ByteSize;
+use concerto_api::metrics as api_metrics;
 use concerto_api::AppState;
 use concerto_backend::{BackendManager, PortAllocator, ProcessBackendManager};
 use concerto_config::ConcertoConfig;
@@ -57,6 +58,11 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
 
     let cluster = build_initial_cluster_state(&gpu, &config).await?;
 
+    // Install the process-global Prometheus recorder before any metric is
+    // emitted. Idempotent: subsequent calls in the same process (e.g. the
+    // scenario harness also calls this) return the same cached handle.
+    let prometheus = api_metrics::install().context("installing Prometheus recorder")?;
+
     let state = AppState {
         cluster: Arc::new(Mutex::new(cluster)),
         gpu,
@@ -65,6 +71,7 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Notify::new()),
+        prometheus,
     };
 
     let port = args.port_override.unwrap_or(config.server.port);
@@ -131,11 +138,25 @@ fn locate_mock_backend_binary() -> Result<String> {
 
 async fn build_gpu_monitor(args: &Cli) -> Result<Arc<dyn GpuMonitor>> {
     if let Some(n) = args.mock_gpus {
-        Ok(Arc::new(MockGpuMonitor::with_healthy_gpus(n, 24)))
-    } else {
+        return Ok(Arc::new(MockGpuMonitor::with_healthy_gpus(n, 24)));
+    }
+
+    // Real NVML monitor path. Gated on both the `nvml` feature (opt-in at
+    // build time) and `target_os = "linux"` because `nvml-wrapper` only
+    // links on Linux. On any other configuration we return an actionable
+    // error pointing at the build command that would enable it.
+    #[cfg(all(feature = "nvml", target_os = "linux"))]
+    {
+        let monitor = concerto_gpu::NvmlMonitor::new().context("initialising NVML GPU monitor")?;
+        return Ok(Arc::new(monitor));
+    }
+
+    #[cfg(not(all(feature = "nvml", target_os = "linux")))]
+    {
         Err(anyhow!(
-            "--mock-gpus is required for this build; the real NVML-backed monitor \
-             ships with a feature flag in a later sprint"
+            "--mock-gpus is required unless concerto-cli is built with the \
+             `nvml` feature on Linux. On a Linux host with NVIDIA drivers \
+             installed: cargo build --release -p concerto-cli --features nvml"
         ))
     }
 }

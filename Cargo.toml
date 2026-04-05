@@ -45,6 +45,10 @@ clap = { version = "4", features = ["derive"] }
 # GPU monitoring
 nvml-wrapper = "0.10"
 
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+
 # Utilities
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

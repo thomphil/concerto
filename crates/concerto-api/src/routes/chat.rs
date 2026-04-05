@@ -15,10 +15,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use concerto_core::ModelId;
 use futures::StreamExt;
+use metrics::counter;
 use serde_json::Value;
 
 use crate::error::ApiError;
-use crate::orchestrator::route_and_dispatch;
+use crate::metrics::REQUESTS_TOTAL;
+use crate::orchestrator::{route_and_dispatch, RoutingKind};
 use crate::types::ChatCompletionRequest;
 use crate::AppState;
 
@@ -26,13 +28,29 @@ pub async fn completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
+    let outcome = completions_inner(&state, req).await;
+    let decision_label = match &outcome {
+        Ok((_, kind)) => kind.label(),
+        Err(e) => decision_label_for_error(e),
+    };
+    counter!(REQUESTS_TOTAL, "decision" => decision_label).increment(1);
+    outcome.map(|(resp, _)| resp)
+}
+
+/// Inner handler body. Separated from [`completions`] so the outer
+/// function owns the metric emission regardless of which exit path the
+/// request takes (including `?`-propagation of upstream errors).
+async fn completions_inner(
+    state: &AppState,
+    req: ChatCompletionRequest,
+) -> Result<(Response, RoutingKind), ApiError> {
     let model_id = ModelId(req.model.clone());
     tracing::info!(model = %model_id, stream = req.stream, "incoming chat completion");
 
     // Decide where the request should go. This is the orchestrator state
     // machine — may launch a new backend, subscribe to an in-flight load,
     // or evict a stale model.
-    let target = route_and_dispatch(&state, model_id.clone()).await?;
+    let target = route_and_dispatch(state, model_id.clone()).await?;
 
     // Rebuild the JSON body exactly as the client sent it (model + messages
     // + any flattened extras).
@@ -76,7 +94,7 @@ pub async fn completions(
             .body(body)
             .map_err(|e| ApiError::Internal(format!("building stream response: {e}")))?;
         *response.headers_mut() = headers;
-        Ok(response)
+        Ok((response, target.kind))
     } else {
         // Non-streaming: read the whole body into memory and forward.
         let bytes = upstream
@@ -88,7 +106,19 @@ pub async fn completions(
         for (k, v) in headers.iter() {
             response_headers.insert(k, v.clone());
         }
-        Ok(response)
+        Ok((response, target.kind))
+    }
+}
+
+/// Map an [`ApiError`] into the `decision` label used by
+/// `concerto_requests_total`. The label set is deliberately small so
+/// dashboards can reason about it without having to enumerate every
+/// internal error variant.
+fn decision_label_for_error(e: &ApiError) -> &'static str {
+    match e {
+        ApiError::AllGpusUnhealthy => "rejected_all_unhealthy",
+        ApiError::BackendUnavailable(_) => "rejected_backend_unavailable",
+        _ => "error",
     }
 }
 

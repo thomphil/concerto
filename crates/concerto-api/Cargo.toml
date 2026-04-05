@@ -17,6 +17,8 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 bytesize = { workspace = true }
 futures = "0.3"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 concerto-core = { workspace = true }
 concerto-config = { workspace = true }
 concerto-gpu = { workspace = true }

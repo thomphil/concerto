@@ -343,6 +343,10 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
     let cluster = ClusterState::new(gpu_states, config.model_registry());
 
     let shutdown = Arc::new(Notify::new());
+    // Install the Prometheus recorder once per process. Scenarios spawn
+    // multiple harnesses in parallel within a single test binary; the
+    // install function is idempotent and returns a shared handle.
+    let prometheus = concerto_api::metrics::install().expect("installing Prometheus recorder");
     let state = AppState {
         cluster: Arc::new(Mutex::new(cluster)),
         gpu: gpu.clone() as Arc<dyn GpuMonitor>,
@@ -351,6 +355,7 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: shutdown.clone(),
+        prometheus,
     };
 
     // Grab an ephemeral loopback port the serve loop can bind. Binding and
