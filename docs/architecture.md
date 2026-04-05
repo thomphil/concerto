@@ -312,6 +312,140 @@ Concerto is built on tokio from top to bottom. The general pattern:
 `Arc<T>` is preferred over `Rc<T>` throughout, and there are no `unsafe`
 blocks anywhere in the codebase.
 
+## Orchestrator State Machine
+
+The orchestrator bridges `concerto-core`'s pure `RoutingDecision` output
+with the side-effectful backend lifecycle management in `concerto-backend`.
+The state transitions look simple on paper — "route, launch, forward" —
+but the first ten things that happen under real traffic surface edge
+cases that, if ignored, produce leaked backends, dropped streams, and
+ghost models in cluster state. This section documents how v0.1 handles
+each of them.
+
+### Eight hard problems
+
+1. **Concurrent cold-start of the same model.** Two requests for a cold
+   model arrive simultaneously; a naive orchestrator launches two
+   backends, wastes VRAM, and races them. v0.1 solves this with a
+   load-dedup map keyed by `ModelId` that maps to a
+   `broadcast::Sender<LoadResult>`. The first request creates the
+   channel and performs the launch; subsequent requests subscribe to the
+   broadcast and await the outcome. Exactly one launch per cold start,
+   regardless of how many concurrent requesters.
+
+2. **Decide→execute race across different models.** Request A for model
+   X picks GPU 0; while A is still launching, request B for model Y
+   also picks GPU 0 because A's memory reservation hasn't been
+   committed. v0.1 makes the routing decision and the slot reservation
+   happen under the same `Mutex<ClusterState>` critical section. Reads
+   by the router consult the pending-load entries alongside the
+   `loaded_models` list, so B correctly sees the incoming load and
+   picks a different GPU (or triggers eviction).
+
+3. **Backend crash mid-request.** A backend process dies while serving
+   a streaming response. The cluster state still thinks the model is
+   loaded; subsequent requests go to a dead port. v0.1 runs a periodic
+   background health-check loop that probes every known backend via
+   `BackendManager::health_check` and transactionally removes the dead
+   entry from both the `backends` map and the `cluster.loaded_models`
+   list. The in-flight request that hit the crash receives a clean 502
+   with a specific error kind.
+
+4. **Failed-load rollback.** Concerto evicts model A to make room for
+   model B; model B fails to start. A naive implementation would leave
+   the cluster thinking A is evicted and B is loaded — neither is true.
+   v0.1 wires every failure path through `finalise_launch`, which
+   always clears the dedup entry and broadcasts the error to
+   subscribers. The reservation and commit steps are separate critical
+   sections so rollback never has to undo a half-committed state.
+
+5. **Streaming in flight during eviction.** The router decides to
+   evict model X, but there's an active SSE stream from its backend.
+   v0.1 applies a grace period (`eviction_grace_period_secs`, default
+   30 seconds) during which the backend is not killed; in-flight
+   streams drain naturally. On expiry, SIGTERM is sent and any
+   stragglers get a clean 502 rather than a dropped connection. This
+   is best-effort in v0.1 and fully hardened in Sprint 3.
+
+6. **Orphan backends from a previous Concerto process on restart.** If
+   Concerto crashes or is killed without a graceful shutdown, the
+   backend subprocesses may still be holding VRAM and listening on
+   ports. On next startup, v0.1 scans the configured port range, kills
+   any process squatting in it, and logs a loud warning. v0.1 assumes
+   a single Concerto instance per host — a state-file plus
+   adopt-on-restart approach lands in v0.2.
+
+7. **Fairness starvation.** If model A at 1000 req/s evicts model B
+   at 1 req/s repeatedly, model B never stays warm. **v0.1 deliberately
+   does not solve this.** LRU is the baseline eviction policy; users
+   who need to protect a low-traffic model from a high-traffic
+   neighbour should pin it via the `pin = true` field in its
+   `[[models]]` entry. Fairness-aware eviction is on the v0.2
+   shortlist.
+
+8. **Multi-GPU tensor-parallel models.** A model that spans 2+ GPUs
+   cannot be placed by v0.1's single-GPU routing. **v0.1 deliberately
+   does not support this.** Every `vram_required` assumes single-GPU
+   placement. Tensor parallelism is on the v0.2 shortlist.
+
+### Orchestrator-specific concurrency primitives
+
+- `Arc<tokio::sync::Mutex<ClusterState>>` — single writer, short
+  critical sections. Decisions are made under the lock; launches happen
+  outside it. No `.await` while the lock is held.
+- `Arc<Mutex<HashMap<ModelId, broadcast::Sender<LoadResult>>>>` — the
+  cold-start dedup table from hard problem 1.
+- `Arc<Mutex<HashMap<ModelId, BackendHandle>>>` — live backend lookup
+  table, maintained alongside the cluster snapshot so both the
+  orchestrator and the health loop can call `BackendManager::stop` and
+  `health_check` without re-deriving the handle.
+- A single background `tokio::task` drives the health-check loop,
+  selecting on the shutdown notifier so it stops cleanly on SIGTERM.
+
+### Happy-path request lifecycle (cold start)
+
+```
+  Client         concerto-api        ClusterState        concerto-backend
+    │               │                    │                      │
+    │  POST /chat   │                    │                      │
+    ├───────────────▶                    │                      │
+    │               │  lock + route      │                      │
+    │               ├───────────────────▶│                      │
+    │               │   LoadModel{gpu}   │                      │
+    │               ◀───────────────────┤│                      │
+    │               │  insert dedup      │                      │
+    │               │  broadcast sender  │                      │
+    │               │  release lock      │                      │
+    │               │                    │                      │
+    │               │  launch(spec, gpu) │                      │
+    │               ├───────────────────────────────────────────▶
+    │               │                    │    spawn + /health   │
+    │               │                    │    poll until 200    │
+    │               │  BackendHandle     │                      │
+    │               ◀───────────────────────────────────────────┤
+    │               │  commit slot       │                      │
+    │               ├───────────────────▶│                      │
+    │               │  broadcast Ok(h)   │                      │
+    │               │                    │                      │
+    │               │  forward POST /v1/chat/completions        │
+    │               ├───────────────────────────────────────────▶
+    │               │                    │    SSE stream        │
+    │               ◀───────────────────────────────────────────┤
+    │    SSE        │                    │                      │
+    ◀───────────────┤                    │                      │
+```
+
+### Orchestrator-level failure modes
+
+| Scenario                          | Detection                                 | Recovery                                                         | v0.1 behaviour                           |
+|-----------------------------------|-------------------------------------------|------------------------------------------------------------------|------------------------------------------|
+| Backend process dies              | Health-check loop + per-request probe     | Remove from cluster state, release slot, next request launches   | Clean 502 to in-flight                   |
+| Load timeout                      | `tokio::time::timeout` around `launch`    | Drop pending slot, broadcast error to waiters                    | 504 with `load_timeout` kind             |
+| All GPUs unhealthy                | `classify_health` on every snapshot       | No placement possible; all requests rejected                     | 503 with `backend_unavailable` kind      |
+| Eviction blocked by pinned models | `select_evictions` returns `None` for all | Reject the incoming request with a pin-specific reason           | 503 with a clear reason string           |
+| Orphan backends on startup        | Port range scan                           | Kill + log warning                                               | Deterministic clean start                |
+| Streaming during eviction         | Grace-period timer                        | Stream drains; SIGTERM on expiry                                 | Best-effort in v0.1; hardened in Sprint 3 |
+
 ## Non-Goals for MVP
 
 The following are explicitly out of scope for the first release and should
