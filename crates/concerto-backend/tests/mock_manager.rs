@@ -149,6 +149,7 @@ async fn stop_unknown_handle_is_noop() {
         port: 8500,
         model_id: ModelId::from("ghost"),
         gpu_id: GpuId(0),
+        health_path: "/health".to_string(),
     };
     manager.stop(&fake).await.expect("stop should be a no-op");
     assert_eq!(manager.stopped_count(), 0);

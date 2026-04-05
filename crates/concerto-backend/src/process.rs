@@ -64,11 +64,11 @@ impl ProcessBackendManager {
         self
     }
 
-    /// Poll the backend's `/health` endpoint until it returns 200 or the
+    /// Poll the backend's health endpoint until it returns 200 or the
     /// startup timeout elapses.
-    async fn wait_until_healthy(&self, port: u16) -> Result<(), BackendError> {
+    async fn wait_until_healthy(&self, port: u16, path: &str) -> Result<(), BackendError> {
         let deadline = Instant::now() + self.startup_timeout;
-        let url = health_url(port);
+        let url = health_url(port, path);
         loop {
             if Instant::now() >= deadline {
                 return Err(BackendError::HealthCheckTimeout);
@@ -107,7 +107,8 @@ impl BackendManager for ProcessBackendManager {
     async fn launch(&self, spec: &ModelSpec, gpu_id: GpuId) -> Result<BackendHandle, BackendError> {
         let port = self.ports.allocate().ok_or(BackendError::NoFreePort)?;
         let mut command = build_command(spec, gpu_id, port);
-        info!(model_id = %spec.id, %gpu_id, port, engine = ?spec.engine, "spawning backend process");
+        let health_path = default_health_path(&spec.engine);
+        info!(model_id = %spec.id, %gpu_id, port, engine = ?spec.engine, health_path = %health_path, "spawning backend process");
 
         let mut child = command.spawn().map_err(|err| {
             self.ports.release(port);
@@ -126,7 +127,7 @@ impl BackendManager for ProcessBackendManager {
 
         // Wait for the backend to become healthy; on failure, kill the child
         // so we don't leak processes.
-        if let Err(err) = self.wait_until_healthy(port).await {
+        if let Err(err) = self.wait_until_healthy(port, &health_path).await {
             warn!(pid, port, "backend did not become healthy; killing child");
             let _ = child.kill().await;
             self.ports.release(port);
@@ -139,6 +140,7 @@ impl BackendManager for ProcessBackendManager {
             port,
             model_id: spec.id.clone(),
             gpu_id,
+            health_path,
         };
         info!(model_id = %spec.id, pid, port, "backend ready");
         Ok(handle)
@@ -161,7 +163,7 @@ impl BackendManager for ProcessBackendManager {
 
     async fn health_check(&self, handle: &BackendHandle) -> bool {
         self.http
-            .get(health_url(handle.port))
+            .get(health_url(handle.port, &handle.health_path))
             .timeout(HTTP_REQUEST_TIMEOUT)
             .send()
             .await
@@ -170,8 +172,19 @@ impl BackendManager for ProcessBackendManager {
     }
 }
 
-fn health_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}/health")
+fn health_url(port: u16, path: &str) -> String {
+    format!("http://127.0.0.1:{port}{path}")
+}
+
+/// The HTTP path a backend exposes for health probes. Built-in engines all use
+/// `/health`; `EngineType::Custom` carries its own `health_endpoint`.
+pub(crate) fn default_health_path(engine: &EngineType) -> String {
+    match engine {
+        EngineType::Custom {
+            health_endpoint, ..
+        } => health_endpoint.clone(),
+        _ => "/health".to_string(),
+    }
 }
 
 /// Build (but do not spawn) the [`Command`] that would launch a backend for
@@ -184,7 +197,7 @@ pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
     let port_str = port.to_string();
     let weight = spec.weight_path.as_str();
 
-    let mut command = match spec.engine {
+    let mut command = match &spec.engine {
         EngineType::Vllm => {
             let mut c = Command::new("python");
             c.args([
@@ -217,6 +230,33 @@ pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
         EngineType::Mock => {
             let mut c = Command::new("mock-inference-backend");
             c.args(["--port", &port_str]);
+            c
+        }
+        EngineType::Custom {
+            command: program,
+            args,
+            health_endpoint: _,
+        } => {
+            let mut c = Command::new(program);
+            // Substitute `{port}` tokens in the user-supplied args. If the
+            // user didn't include a placeholder, append `--port <port>` for
+            // them so the common case just works.
+            let mut had_port_token = false;
+            let substituted: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    if a.contains("{port}") {
+                        had_port_token = true;
+                        a.replace("{port}", &port_str)
+                    } else {
+                        a.clone()
+                    }
+                })
+                .collect();
+            c.args(substituted);
+            if !had_port_token {
+                c.args(["--port", &port_str]);
+            }
             c
         }
     };

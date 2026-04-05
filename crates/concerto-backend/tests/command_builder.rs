@@ -132,3 +132,52 @@ fn engine_args_preserve_order_after_builtin_args() {
     assert!(port < first, "built-in args should come before engine args");
     assert!(first < second, "engine args should preserve order");
 }
+
+#[test]
+fn custom_engine_substitutes_port_token() {
+    let spec = spec_with_engine(
+        EngineType::Custom {
+            command: "my-inference-server".to_string(),
+            args: vec![
+                "--weights".to_string(),
+                "/models/test-model".to_string(),
+                "--port".to_string(),
+                "{port}".to_string(),
+            ],
+            health_endpoint: "/ready".to_string(),
+        },
+        vec![],
+    );
+    let cmd = build_command(&spec, GpuId(1), 8123);
+
+    assert_eq!(program(&cmd), "my-inference-server");
+    let args = args(&cmd);
+    assert!(args.contains(&"--weights".to_string()));
+    assert!(args.contains(&"/models/test-model".to_string()));
+    // The {port} placeholder was substituted.
+    assert!(args.contains(&"8123".to_string()));
+    // Exactly one `--port` — the user's, not an appended fallback.
+    let port_flags = args.iter().filter(|a| *a == "--port").count();
+    assert_eq!(port_flags, 1, "expected exactly one --port flag");
+    assert_eq!(env(&cmd, "CUDA_VISIBLE_DEVICES").as_deref(), Some("1"));
+}
+
+#[test]
+fn custom_engine_appends_port_when_no_placeholder() {
+    // If the user's args don't contain {port}, the builder should append
+    // `--port <port>` so common cases still work.
+    let spec = spec_with_engine(
+        EngineType::Custom {
+            command: "other-server".to_string(),
+            args: vec!["--weights".to_string(), "/models/test-model".to_string()],
+            health_endpoint: "/health".to_string(),
+        },
+        vec![],
+    );
+    let cmd = build_command(&spec, GpuId(0), 8999);
+
+    assert_eq!(program(&cmd), "other-server");
+    let args = args(&cmd);
+    assert!(args.contains(&"--port".to_string()));
+    assert!(args.contains(&"8999".to_string()));
+}
