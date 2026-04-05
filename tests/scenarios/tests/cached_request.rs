@@ -1,42 +1,33 @@
-//! ROADMAP §6.3 scenario 2: a second request for the same model is served
-//! from the existing backend — no new launch, request counter bumps.
+//! ROADMAP §6.3 scenario 2: second request for the same model reuses the
+//! existing backend. Asserts no new launch + request_count bump in the
+//! cluster state.
 
-use concerto_api::orchestrator::route_and_dispatch;
 use concerto_core::ModelId;
-use concerto_scenarios::{build_harness, ScenarioConfig};
+use concerto_scenarios::{spawn_scenario, ScenarioConfig};
 
 #[tokio::test]
 async fn cached_request_reuses_backend() {
-    let h = build_harness(ScenarioConfig {
-        gpu_count: 1,
-        memory_per_gpu_gb: 24,
-        models: vec![("model-a".into(), 8)],
-    })
-    .await;
+    let server = spawn_scenario(ScenarioConfig::new(1, 24).with_model("model-a", 8)).await;
 
-    let first = route_and_dispatch(&h.state, ModelId("model-a".into()))
-        .await
-        .expect("first request loads");
-    let second = route_and_dispatch(&h.state, ModelId("model-a".into()))
-        .await
-        .expect("second request reuses");
+    let first = server.post_chat("model-a", "hi").await;
+    assert_eq!(first.status(), 200);
+    let second = server.post_chat("model-a", "again").await;
+    assert_eq!(second.status(), 200);
 
-    // Same port both times.
-    assert_eq!(first.port, second.port);
-    // Exactly one launch.
-    assert_eq!(h.backend.launched_count(), 1);
-    assert_eq!(h.backend.stopped_count(), 0);
+    // Only one launch, no stops.
+    assert_eq!(server.backend.launched_count(), 1);
+    assert_eq!(server.backend.stopped_count(), 0);
 
-    // The second request bumped the request_count on the loaded model.
-    let cluster = h.state.cluster.lock().await;
+    // The loaded model's request_count should reflect both touches.
+    let cluster = server.state.cluster.lock().await;
     let loaded = cluster
         .gpus
         .iter()
         .flat_map(|g| g.loaded_models.iter())
         .find(|m| m.model_id == ModelId("model-a".into()))
         .expect("model is loaded");
-    assert_eq!(
-        loaded.request_count, 2,
-        "both requests should have touched the counter"
-    );
+    assert_eq!(loaded.request_count, 2);
+    drop(cluster);
+
+    server.shutdown().await;
 }

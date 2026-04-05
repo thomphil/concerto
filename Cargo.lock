@@ -397,6 +397,7 @@ name = "concerto-scenarios"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytesize",
  "concerto-api",
  "concerto-backend",
