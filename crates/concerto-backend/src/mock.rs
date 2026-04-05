@@ -141,6 +141,7 @@ impl BackendManager for MockBackendManager {
             port,
             model_id: spec.id.clone(),
             gpu_id,
+            health_path: "/health".to_string(),
         };
 
         self.handles.write().await.insert(port, handle.clone());

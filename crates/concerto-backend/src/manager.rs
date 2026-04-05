@@ -19,6 +19,14 @@ pub struct BackendHandle {
     pub model_id: ModelId,
     /// The GPU this backend was placed on.
     pub gpu_id: GpuId,
+    /// HTTP path the backend exposes for health probes (e.g. `/health` for
+    /// built-in engines, or a user-supplied path for `EngineType::Custom`).
+    #[serde(default = "default_health_path")]
+    pub health_path: String,
+}
+
+fn default_health_path() -> String {
+    "/health".to_string()
 }
 
 /// Abstraction over the lifecycle of an inference engine backend.

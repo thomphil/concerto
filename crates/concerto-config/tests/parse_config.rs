@@ -339,3 +339,63 @@ fn malformed_toml_produces_parse_error() {
     let err = ConcertoConfig::from_toml_str(toml).unwrap_err();
     assert!(matches!(err, ConfigError::Parse(_)));
 }
+
+#[test]
+fn parses_custom_engine_variant() {
+    let toml = r#"
+        [[models]]
+        id = "my-custom"
+        name = "Custom Server"
+        weight_path = "/models/custom"
+        vram_required = "8 GB"
+        engine = { custom = { command = "my-inference-server", args = ["--weights", "/models/custom", "--port", "{port}"], health_endpoint = "/ready" } }
+
+        [[gpus]]
+        id = 0
+    "#;
+
+    let config = ConcertoConfig::from_toml_str(toml).expect("config should parse");
+    assert_eq!(config.models.len(), 1);
+    match &config.models[0].engine {
+        EngineType::Custom {
+            command,
+            args,
+            health_endpoint,
+        } => {
+            assert_eq!(command, "my-inference-server");
+            assert_eq!(args.len(), 4);
+            assert_eq!(args[3], "{port}");
+            assert_eq!(health_endpoint, "/ready");
+        }
+        other => panic!("expected EngineType::Custom, got {:?}", other),
+    }
+}
+
+#[test]
+fn existing_string_engines_still_parse_after_custom_variant_added() {
+    // Regression test — the addition of the Custom struct variant must not
+    // break the bare-string form used for built-in engines.
+    for (engine_str, expected) in [
+        ("vllm", EngineType::Vllm),
+        ("llamacpp", EngineType::LlamaCpp),
+        ("sglang", EngineType::Sglang),
+        ("mock", EngineType::Mock),
+    ] {
+        let toml = format!(
+            r#"
+            [[models]]
+            id = "m"
+            name = "M"
+            weight_path = "/m"
+            vram_required = "1 GB"
+            engine = "{engine_str}"
+
+            [[gpus]]
+            id = 0
+            "#
+        );
+        let config =
+            ConcertoConfig::from_toml_str(&toml).expect("{engine_str} bare form should parse");
+        assert_eq!(config.models[0].engine, expected);
+    }
+}

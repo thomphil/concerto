@@ -31,3 +31,16 @@ max_temperature = 82
 
 [[gpus]]
 id = 1
+
+# Extension hatch: `EngineType::Custom` lets you point Concerto at any
+# inference engine binary. The `{port}` token in `args` is substituted with
+# the allocated port at launch time; if absent, `--port <port>` is appended
+# automatically. The engine must respond to `GET {health_endpoint}` with
+# HTTP 200 once it is ready to serve requests.
+#
+# [[models]]
+# id = "my-custom-model"
+# name = "My Custom Engine Model"
+# weight_path = "/models/my-custom"
+# vram_required = "8GB"
+# engine = { custom = { command = "my-inference-server", args = ["--weights", "/models/my-custom", "--port", "{port}"], health_endpoint = "/ready" } }

@@ -96,6 +96,18 @@ pub struct ModelSpec {
 }
 
 /// Which inference engine to use for a model.
+///
+/// The built-in engines (vLLM, llama.cpp, SGLang, mock) serialise as bare
+/// strings in TOML: `engine = "vllm"`. The `Custom` variant serialises as a
+/// tagged table to carry its extra fields:
+///
+/// ```toml
+/// engine = { custom = { command = "my-server", args = ["--port", "{port}"], health_endpoint = "/ready" } }
+/// ```
+///
+/// The `{port}` placeholder in `args` is substituted with the allocated port
+/// at launch time. If no `{port}` placeholder is present, `--port <port>` is
+/// appended automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EngineType {
@@ -104,6 +116,13 @@ pub enum EngineType {
     Sglang,
     /// For testing — uses our mock backend
     Mock,
+    /// Extension hatch for custom inference engines. The engine must respond
+    /// to `GET {health_endpoint}` with HTTP 200 once ready to serve requests.
+    Custom {
+        command: String,
+        args: Vec<String>,
+        health_endpoint: String,
+    },
 }
 
 /// Configuration for routing behaviour.
