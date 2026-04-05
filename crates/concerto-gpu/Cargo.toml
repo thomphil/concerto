@@ -2,5 +2,26 @@
 name = "concerto-gpu"
 version.workspace = true
 edition.workspace = true
+description = "GPU monitoring abstractions for Concerto: GpuMonitor trait, mock implementation, and optional NVML-backed implementation."
 
 [dependencies]
+async-trait = { workspace = true }
+bytesize = { workspace = true }
+concerto-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# `nvml-wrapper` links against `libnvidia-ml`, which only ships with NVIDIA's
+# Linux drivers. We therefore only pull it in on Linux — enabling the `nvml`
+# feature on other targets compiles cleanly but has no effect at runtime.
+[target.'cfg(target_os = "linux")'.dependencies]
+nvml-wrapper = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = []
+nvml = ["dep:nvml-wrapper"]
