@@ -4,3 +4,20 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+bytesize = { workspace = true }
+futures = "0.3"
+concerto-core = { workspace = true }
+concerto-config = { workspace = true }
+concerto-gpu = { workspace = true }
+concerto-backend = { workspace = true }

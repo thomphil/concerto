@@ -35,4 +35,8 @@ pub enum ConfigError {
     /// only fires for port `0`.
     #[error("invalid server port: {0} (must be 1-65535)")]
     InvalidPort(u16),
+
+    /// `routing.port_range_start` is not strictly less than `port_range_end`.
+    #[error("invalid port range: start ({start}) must be strictly less than end ({end})")]
+    InvalidPortRange { start: u16, end: u16 },
 }
