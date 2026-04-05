@@ -14,6 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 bytesize = { workspace = true }
 futures = "0.3"
 concerto-api = { workspace = true }
@@ -23,4 +24,7 @@ concerto-gpu = { workspace = true }
 concerto-backend = { workspace = true }
 
 [dev-dependencies]
+# mock-inference-backend is built as a workspace binary; scenarios locate it
+# at runtime relative to the test exe (see mock_backend_binary() in lib.rs).
+# The dev-dependency makes cargo build it before the scenarios tests run.
 mock-inference-backend = { path = "../mock_backend" }

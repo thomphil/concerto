@@ -1,76 +1,283 @@
-//! Shared harness for the orchestrator scenario suite.
+//! End-to-end scenario harness.
 //!
-//! Each scenario drives [`concerto_api::orchestrator::route_and_dispatch`]
-//! directly against a freshly constructed [`AppState`] — this is what
-//! actually tests the state machine from ROADMAP §3 (concurrent cold-start
-//! dedup, eviction-then-launch races, failed-load rollback, backend crash
-//! recovery).
+//! Each scenario spins up a full `concerto-api::serve` HTTP server on an
+//! ephemeral loopback port, backed by:
 //!
-//! For v0.1 the backend is [`MockBackendManager`], which is configurable
-//! (launch latency, crash injection, launch failure) and exposes counters
-//! (`launched_count`, `stopped_count`) the scenarios can assert on.
+//! - `MockGpuMonitor::with_healthy_gpus(...)` for deterministic GPU state
+//! - `ProcessBackendManager` — the real production backend manager —
+//!   spawning the `mock-inference-backend` binary as a child process per
+//!   model via `EngineType::Custom`
 //!
-//! This deliberately deviates from ROADMAP §6.3's "production code path"
-//! goal: §6.3 asks scenarios to exercise `ProcessBackendManager` spawning
-//! real `mock-inference-backend` subprocesses. That migration happens in
-//! Sprint 2, which is already the forcing function for the process-spawn
-//! code path. The HTTP layer is covered by the interactive verification
-//! in the U3 commit message; the scenarios here protect the orchestrator
-//! state machine — which is what we actually need to keep correct during
-//! the rest of Sprint 1.
+//! This exercises the production code path end-to-end (HTTP → orchestrator
+//! → process spawn → health probe → reverse proxy) the way ROADMAP §6.3
+//! originally specified. It's slower than the old `MockBackendManager`-only
+//! harness (real subprocess startup takes 200–800ms), so scenarios prefer
+//! small numbers of backends and short chains.
+//!
+//! Each harness gets its own TCP port range via a global atomic counter, so
+//! parallel `cargo test` runs don't collide on backend ports.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytesize::ByteSize;
-use concerto_api::AppState;
-use concerto_backend::{BackendManager, MockBackendManager};
+use concerto_api::{serve, AppState};
+use concerto_backend::{
+    BackendError, BackendHandle, BackendManager, PortAllocator, ProcessBackendManager,
+};
 use concerto_config::{
     ConcertoConfig, GpuConfigEntry, ModelConfigEntry, RoutingSection, ServerConfig,
 };
-use concerto_core::{ClusterState, EngineType, GpuHealth, GpuState};
+use concerto_core::{ClusterState, EngineType, GpuHealth, GpuState, ModelSpec};
 use concerto_gpu::{GpuMonitor, MockGpuMonitor};
 use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
 
-/// Everything a scenario test needs to drive the orchestrator.
-pub struct ScenarioHarness {
-    pub state: AppState,
-    pub backend: Arc<MockBackendManager>,
-    pub gpu: Arc<MockGpuMonitor>,
+/// Where a scenario can find the `mock-inference-backend` binary. Resolved
+/// once per process: walks up from the current test exe (under
+/// `target/debug/deps/`) to `target/debug/` and looks for the binary there.
+fn mock_backend_binary() -> PathBuf {
+    let exe = std::env::current_exe().expect("current_exe");
+    // target/debug/deps/<testbin>-<hash>  → target/debug/
+    let debug_dir = exe
+        .parent()
+        .and_then(|deps| deps.parent())
+        .expect("test binary should live under target/<profile>/deps/");
+    let candidate = debug_dir.join("mock-inference-backend");
+    assert!(
+        candidate.exists(),
+        "mock-inference-backend not found at {}. \
+         Run `cargo build -p mock-inference-backend` first, or depend on \
+         the crate as a [dev-dependencies] so cargo builds it as part of \
+         the scenarios test target.",
+        candidate.display()
+    );
+    candidate
 }
 
-/// Configuration for a scenario.
+/// Hands out a unique 100-port range to every scenario harness so parallel
+/// `cargo test` runs don't contend on backend ports. Starts at 19100
+/// (chosen to avoid Prometheus / node_exporter / common dev-server ranges).
+fn next_port_range() -> std::ops::Range<u16> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let idx = NEXT.fetch_add(1, Ordering::SeqCst);
+    let start = 19100 + (idx as u16) * 100;
+    start..(start + 100)
+}
+
+/// Test-only [`BackendManager`] wrapper that counts launch / stop calls.
+///
+/// This keeps production `ProcessBackendManager` free of observability hooks
+/// that are only useful in tests. In real deployments the equivalent
+/// information comes from the Prometheus metrics landing in Sprint 3.
+pub struct CountingBackendManager {
+    inner: Arc<dyn BackendManager>,
+    launched: AtomicUsize,
+    stopped: AtomicUsize,
+}
+
+impl CountingBackendManager {
+    pub fn new(inner: Arc<dyn BackendManager>) -> Self {
+        Self {
+            inner,
+            launched: AtomicUsize::new(0),
+            stopped: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn launched_count(&self) -> usize {
+        self.launched.load(Ordering::SeqCst)
+    }
+
+    pub fn stopped_count(&self) -> usize {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl BackendManager for CountingBackendManager {
+    async fn launch(
+        &self,
+        spec: &ModelSpec,
+        gpu_id: concerto_core::GpuId,
+    ) -> Result<BackendHandle, BackendError> {
+        let result = self.inner.launch(spec, gpu_id).await;
+        if result.is_ok() {
+            self.launched.fetch_add(1, Ordering::SeqCst);
+        }
+        result
+    }
+
+    async fn stop(&self, handle: &BackendHandle) -> Result<(), BackendError> {
+        let result = self.inner.stop(handle).await;
+        // Stop counts the intent even if the underlying call errored — the
+        // process is gone either way and the test assertion should reflect
+        // that intent.
+        self.stopped.fetch_add(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn health_check(&self, handle: &BackendHandle) -> bool {
+        self.inner.health_check(handle).await
+    }
+}
+
+/// Extra per-model args passed to the `mock-inference-backend` binary.
+#[derive(Debug, Clone, Default)]
+pub struct ModelMockArgs {
+    /// Add `--startup-delay-secs <n>` so backend startup has a long window
+    /// during which concurrent requests can pile up on the dedup channel.
+    pub startup_delay_secs: Option<u64>,
+    /// Add `--crash-after <n>` so the backend exits after handling N
+    /// chat-completion requests. Used by the crash-recovery scenario.
+    pub crash_after: Option<usize>,
+}
+
+/// Configuration for a scenario server.
+#[derive(Debug, Clone)]
 pub struct ScenarioConfig {
     pub gpu_count: usize,
     pub memory_per_gpu_gb: u64,
-    /// `(id, vram_gb)` pairs. Order matters for `lru_eviction`-style tests
-    /// because the model registry is iterated for placement decisions.
-    pub models: Vec<(String, u64)>,
+    /// `(id, vram_gb, mock_args)` tuples. Order matters for LRU-style tests.
+    pub models: Vec<(String, u64, ModelMockArgs)>,
+    /// Override the default health-check loop interval (10s is far too slow
+    /// for tests; scenarios usually want something on the order of 200ms).
+    pub health_check_interval_secs: u64,
 }
 
-impl Default for ScenarioConfig {
-    fn default() -> Self {
+impl ScenarioConfig {
+    pub fn new(gpu_count: usize, memory_per_gpu_gb: u64) -> Self {
         Self {
-            gpu_count: 2,
-            memory_per_gpu_gb: 24,
-            models: vec![("model-a".into(), 8)],
+            gpu_count,
+            memory_per_gpu_gb,
+            models: vec![],
+            health_check_interval_secs: 1,
+        }
+    }
+
+    pub fn with_model(mut self, id: &str, vram_gb: u64) -> Self {
+        self.models
+            .push((id.into(), vram_gb, ModelMockArgs::default()));
+        self
+    }
+
+    pub fn with_model_args(mut self, id: &str, vram_gb: u64, args: ModelMockArgs) -> Self {
+        self.models.push((id.into(), vram_gb, args));
+        self
+    }
+}
+
+/// A running scenario server. Always call [`ServerHandle::shutdown`] — the
+/// `Drop` impl is a best-effort safety net, but explicit shutdown guarantees
+/// every spawned `mock-inference-backend` child is reaped before the test
+/// returns.
+pub struct ServerHandle {
+    pub base_url: String,
+    pub backend: Arc<CountingBackendManager>,
+    pub gpu: Arc<MockGpuMonitor>,
+    pub state: AppState,
+    pub client: reqwest::Client,
+    shutdown: Arc<Notify>,
+    serve_task: Option<JoinHandle<()>>,
+    shut_down: AtomicBool,
+}
+
+impl ServerHandle {
+    /// Trigger graceful shutdown and await completion of the serve task.
+    /// Idempotent — calling twice is a no-op on the second call.
+    pub async fn shutdown(mut self) {
+        self.shut_down.store(true, Ordering::SeqCst);
+        self.shutdown.notify_waiters();
+        if let Some(task) = self.serve_task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        }
+    }
+
+    /// POST a non-streaming chat-completion to the server.
+    pub async fn post_chat(&self, model: &str, content: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": content}]
+            }))
+            .send()
+            .await
+            .expect("chat POST should complete")
+    }
+
+    /// POST a streaming chat-completion and return the raw response for the
+    /// caller to consume the SSE stream from.
+    pub async fn post_chat_stream(&self, model: &str, content: &str) -> reqwest::Response {
+        self.client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .json(&serde_json::json!({
+                "model": model,
+                "stream": true,
+                "messages": [{"role": "user", "content": content}]
+            }))
+            .send()
+            .await
+            .expect("streaming chat POST should complete")
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        if !self.shut_down.load(Ordering::SeqCst) {
+            // Best-effort safety net for scenarios that forget to call
+            // shutdown explicitly. The spawn task will abort and the OS
+            // will reap the children eventually, but the `.shutdown()`
+            // path is strictly better.
+            self.shutdown.notify_waiters();
+            if let Some(task) = self.serve_task.take() {
+                task.abort();
+            }
         }
     }
 }
 
-/// Build a [`ScenarioHarness`] with in-memory mocks and an empty cluster.
-pub async fn build_harness(cfg: ScenarioConfig) -> ScenarioHarness {
+/// Spin up a scenario server. Returns once the HTTP listener is ready to
+/// accept connections.
+pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
+    let binary = mock_backend_binary();
+    let binary_str = binary
+        .to_str()
+        .expect("mock-inference-backend path must be UTF-8")
+        .to_string();
+
+    // Build engine args per model, so the crash/delay scenarios can drive
+    // the mock-backend binary with whatever flags they need.
     let models: Vec<ModelConfigEntry> = cfg
         .models
         .iter()
-        .map(|(id, vram_gb)| ModelConfigEntry {
-            id: id.clone(),
-            name: id.clone(),
-            weight_path: format!("/models/{id}"),
-            vram_required: ByteSize::gb(*vram_gb),
-            engine: EngineType::Mock,
-            engine_args: vec![],
-            pin: false,
+        .map(|(id, vram_gb, mock_args)| {
+            let mut args = vec!["--port".to_string(), "{port}".to_string()];
+            if let Some(delay) = mock_args.startup_delay_secs {
+                args.push("--startup-delay-secs".to_string());
+                args.push(delay.to_string());
+            }
+            if let Some(crash_after) = mock_args.crash_after {
+                args.push("--crash-after".to_string());
+                args.push(crash_after.to_string());
+            }
+            ModelConfigEntry {
+                id: id.clone(),
+                name: id.clone(),
+                weight_path: format!("/models/{id}"),
+                vram_required: ByteSize::gb(*vram_gb),
+                engine: EngineType::Custom {
+                    command: binary_str.clone(),
+                    args,
+                    health_endpoint: "/health".to_string(),
+                },
+                engine_args: vec![],
+                pin: false,
+            }
         })
         .collect();
 
@@ -81,22 +288,40 @@ pub async fn build_harness(cfg: ScenarioConfig) -> ScenarioHarness {
         })
         .collect();
 
+    // The server bind port comes from the ephemeral listener below; the
+    // `port_range_*` fields in RoutingSection drive the backend-child port
+    // allocator, so those need the scenario's unique range.
+    let port_range = next_port_range();
+    let routing = RoutingSection {
+        health_check_interval_secs: cfg.health_check_interval_secs,
+        port_range_start: port_range.start,
+        port_range_end: port_range.end,
+        cold_start_timeout_secs: 15, // keep tests fast when a spawn is wrong
+        ..RoutingSection::default()
+    };
+
     let config = Arc::new(ConcertoConfig {
         server: ServerConfig {
             host: "127.0.0.1".into(),
-            port: 8000,
+            port: 0,
         },
-        routing: RoutingSection::default(),
+        routing,
         models,
         gpus: gpu_entries,
     });
 
+    // Mocks: GPU telemetry is fake, but the backend manager spawns real
+    // subprocesses.
     let gpu = Arc::new(MockGpuMonitor::with_healthy_gpus(
         cfg.gpu_count,
         cfg.memory_per_gpu_gb,
     ));
-    let backend = Arc::new(MockBackendManager::new());
+    let inner_backend: Arc<dyn BackendManager> = Arc::new(
+        ProcessBackendManager::with_port_allocator(PortAllocator::with_range(port_range)),
+    );
+    let backend = Arc::new(CountingBackendManager::new(inner_backend));
 
+    // Seed cluster state from the GPU snapshot.
     let snapshots = gpu.snapshot().await;
     let gpu_states: Vec<GpuState> = snapshots
         .into_iter()
@@ -115,22 +340,63 @@ pub async fn build_harness(cfg: ScenarioConfig) -> ScenarioHarness {
             loaded_models: vec![],
         })
         .collect();
-
     let cluster = ClusterState::new(gpu_states, config.model_registry());
 
+    let shutdown = Arc::new(Notify::new());
     let state = AppState {
         cluster: Arc::new(Mutex::new(cluster)),
         gpu: gpu.clone() as Arc<dyn GpuMonitor>,
         backend: backend.clone() as Arc<dyn BackendManager>,
-        config,
+        config: config.clone(),
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
-        shutdown: Arc::new(Notify::new()),
+        shutdown: shutdown.clone(),
     };
 
-    ScenarioHarness {
-        state,
+    // Grab an ephemeral loopback port the serve loop can bind. Binding and
+    // dropping leaks the port briefly; the serve() rebind race-window is
+    // short enough that this is fine in practice on macOS and Linux.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral");
+    let addr: SocketAddr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let base_url = format!("http://{addr}");
+
+    // Spawn the serve loop.
+    let shutdown_for_serve = shutdown.clone();
+    let state_for_serve = state.clone();
+    let serve_task = tokio::spawn(async move {
+        let shutdown_future = async move {
+            shutdown_for_serve.notified().await;
+        };
+        let _ = serve(state_for_serve, addr, shutdown_future).await;
+    });
+
+    // Give serve() a moment to rebind the port before we return. 100ms is
+    // comfortably longer than any realistic bind latency on dev machines.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    ServerHandle {
+        base_url,
         backend,
         gpu,
+        state,
+        client: reqwest::Client::new(),
+        shutdown,
+        serve_task: Some(serve_task),
+        shut_down: AtomicBool::new(false),
     }
+}
+
+/// Helper for scenarios that want to assert on the chat-completion JSON
+/// shape.
+pub async fn chat_json(resp: reqwest::Response) -> serde_json::Value {
+    assert!(
+        resp.status().is_success(),
+        "expected 2xx, got {}",
+        resp.status()
+    );
+    resp.json().await.expect("chat response is valid JSON")
 }
