@@ -143,12 +143,14 @@ async fn build_gpu_monitor(args: &Cli) -> Result<Arc<dyn GpuMonitor>> {
 
     // Real NVML monitor path. Gated on both the `nvml` feature (opt-in at
     // build time) and `target_os = "linux"` because `nvml-wrapper` only
-    // links on Linux. On any other configuration we return an actionable
-    // error pointing at the build command that would enable it.
+    // links on Linux. Exactly one of the two `#[cfg]` blocks below is
+    // compiled in any given build and becomes the function's tail
+    // expression — avoiding an explicit `return` keeps clippy's
+    // `needless_return` happy on Linux.
     #[cfg(all(feature = "nvml", target_os = "linux"))]
     {
         let monitor = concerto_gpu::NvmlMonitor::new().context("initialising NVML GPU monitor")?;
-        return Ok(Arc::new(monitor));
+        Ok(Arc::new(monitor))
     }
 
     #[cfg(not(all(feature = "nvml", target_os = "linux")))]
