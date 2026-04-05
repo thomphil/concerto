@@ -1,0 +1,26 @@
+[package]
+name = "concerto-scenarios"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+bytesize = { workspace = true }
+futures = "0.3"
+concerto-api = { workspace = true }
+concerto-core = { workspace = true }
+concerto-config = { workspace = true }
+concerto-gpu = { workspace = true }
+concerto-backend = { workspace = true }
+
+[dev-dependencies]
+mock-inference-backend = { path = "../mock_backend" }
