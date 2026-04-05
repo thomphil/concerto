@@ -1,0 +1,31 @@
+[package]
+name = "mock-inference-backend"
+version.workspace = true
+edition.workspace = true
+description = "A tiny HTTP server that pretends to be vLLM for Concerto integration tests."
+
+[[bin]]
+name = "mock-inference-backend"
+path = "src/main.rs"
+
+[lib]
+name = "mock_inference_backend"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+rand = "0.9"
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
