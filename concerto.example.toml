@@ -1,0 +1,32 @@
+[server]
+host = "0.0.0.0"
+port = 8000
+
+[routing]
+eviction_policy = "lru"          # "lru" | "lfu" | "size_weighted_lru"
+cold_start_timeout_secs = 120    # max time to wait for a model to load
+health_check_interval_secs = 10
+
+[[models]]
+id = "qwen2.5-7b"
+name = "Qwen 2.5 7B"
+weight_path = "/models/qwen2.5-7b"
+vram_required = "14GB"
+engine = "vllm"
+engine_args = ["--dtype", "float16", "--max-model-len", "4096"]
+
+[[models]]
+id = "phi-3-mini"
+name = "Phi-3 Mini 3.8B"
+weight_path = "/models/phi-3-mini"
+vram_required = "8GB"
+engine = "llamacpp"
+engine_args = ["--ctx-size", "4096"]
+
+[[gpus]]
+id = 0
+# GPU-specific overrides (optional)
+max_temperature = 82
+
+[[gpus]]
+id = 1
