@@ -50,8 +50,7 @@ fn make_gpu_state(
     let memory_total = ByteSize::gb(total_gb);
     let used: u64 = models.iter().map(|m| m.vram_usage.as_u64()).sum();
     let memory_used = ByteSize::b(used.min(memory_total.as_u64()));
-    let memory_available =
-        ByteSize::b(memory_total.as_u64().saturating_sub(memory_used.as_u64()));
+    let memory_available = ByteSize::b(memory_total.as_u64().saturating_sub(memory_used.as_u64()));
     GpuState {
         id: GpuId(id),
         memory_total,
@@ -82,11 +81,7 @@ fn make_model_spec(id: &str, vram_gb: u64) -> (ModelId, ModelSpec) {
 /// - `LoadModel { gpu_id, evict }` removes the listed models from the GPU, then
 ///   appends the newly-loaded model with its required VRAM footprint.
 /// - `Reject` leaves the state unchanged.
-fn apply_decision(
-    state: &mut ClusterState,
-    model_id: &ModelId,
-    decision: &RoutingDecision,
-) {
+fn apply_decision(state: &mut ClusterState, model_id: &ModelId, decision: &RoutingDecision) {
     match decision {
         RoutingDecision::RouteToLoaded { .. } | RoutingDecision::Reject { .. } => {}
         RoutingDecision::LoadModel { gpu_id, evict } => {
@@ -104,10 +99,13 @@ fn apply_decision(
                         backend_port: 9000,
                     });
                 }
-                let used: u64 = gpu.loaded_models.iter().map(|m| m.vram_usage.as_u64()).sum();
+                let used: u64 = gpu
+                    .loaded_models
+                    .iter()
+                    .map(|m| m.vram_usage.as_u64())
+                    .sum();
                 gpu.memory_used = ByteSize::b(used);
-                gpu.memory_available =
-                    ByteSize::b(gpu.memory_total.as_u64().saturating_sub(used));
+                gpu.memory_available = ByteSize::b(gpu.memory_total.as_u64().saturating_sub(used));
             }
         }
     }
@@ -136,7 +134,11 @@ fn arb_health() -> impl Strategy<Value = GpuHealth> {
 
 /// Strategy producing a `LoadedModel` with up to `max_vram_gb` of VRAM usage.
 /// `slot` is used to make unique model ids and ports per GPU.
-fn arb_loaded_model(gpu_id: usize, slot: usize, max_vram_gb: u64) -> impl Strategy<Value = LoadedModel> {
+fn arb_loaded_model(
+    gpu_id: usize,
+    slot: usize,
+    max_vram_gb: u64,
+) -> impl Strategy<Value = LoadedModel> {
     (
         1u64..=max_vram_gb.max(1),
         0i64..=86_400, // up to 1 day of staleness

@@ -4,7 +4,7 @@
 //! strings so they run without touching the filesystem.
 
 use bytesize::ByteSize;
-use concerto_config::{ConfigError, ConcertoConfig};
+use concerto_config::{ConcertoConfig, ConfigError};
 use concerto_core::{EngineType, EvictionPolicy, ModelId};
 
 const FULL_CONFIG: &str = r#"

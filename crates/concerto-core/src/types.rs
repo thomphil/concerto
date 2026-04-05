@@ -143,19 +143,11 @@ pub enum EvictionPolicy {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoutingDecision {
     /// Model is already loaded — route the request to this backend.
-    RouteToLoaded {
-        gpu_id: GpuId,
-        port: u16,
-    },
+    RouteToLoaded { gpu_id: GpuId, port: u16 },
     /// Model needs to be loaded. Optionally evict other models first.
-    LoadModel {
-        gpu_id: GpuId,
-        evict: Vec<ModelId>,
-    },
+    LoadModel { gpu_id: GpuId, evict: Vec<ModelId> },
     /// Cannot serve this request.
-    Reject {
-        reason: String,
-    },
+    Reject { reason: String },
 }
 
 /// Errors that can occur in core logic.

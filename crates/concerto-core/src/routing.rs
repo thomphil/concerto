@@ -136,7 +136,10 @@ mod tests {
 
         assert!(matches!(
             decision,
-            RoutingDecision::RouteToLoaded { gpu_id: GpuId(0), port: 8001 }
+            RoutingDecision::RouteToLoaded {
+                gpu_id: GpuId(0),
+                port: 8001
+            }
         ));
     }
 
@@ -254,7 +257,11 @@ mod tests {
 
         match decision {
             RoutingDecision::LoadModel { gpu_id, .. } => {
-                assert_eq!(gpu_id, GpuId(1), "Should prefer healthy GPU even with less memory");
+                assert_eq!(
+                    gpu_id,
+                    GpuId(1),
+                    "Should prefer healthy GPU even with less memory"
+                );
             }
             other => panic!("Expected LoadModel, got {:?}", other),
         }
@@ -280,7 +287,13 @@ mod tests {
 
         // Should NOT route to GPU 0 even though model-a is loaded there
         assert!(
-            !matches!(decision, RoutingDecision::RouteToLoaded { gpu_id: GpuId(0), .. }),
+            !matches!(
+                decision,
+                RoutingDecision::RouteToLoaded {
+                    gpu_id: GpuId(0),
+                    ..
+                }
+            ),
             "Should not route to unhealthy GPU"
         );
     }

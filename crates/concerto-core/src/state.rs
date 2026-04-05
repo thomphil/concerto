@@ -47,7 +47,11 @@ impl ClusterState {
     }
 
     /// Get all GPUs that could fit a model of the given size (with headroom).
-    pub fn gpus_with_space_for(&self, vram_required: ByteSize, headroom: ByteSize) -> Vec<&GpuState> {
+    pub fn gpus_with_space_for(
+        &self,
+        vram_required: ByteSize,
+        headroom: ByteSize,
+    ) -> Vec<&GpuState> {
         let total_needed = ByteSize::b(vram_required.as_u64() + headroom.as_u64());
         self.gpus
             .iter()
@@ -134,8 +138,11 @@ pub mod test_helpers {
         }
 
         pub fn build(self) -> GpuState {
-            let memory_available =
-                ByteSize::b(self.memory_total.as_u64().saturating_sub(self.memory_used.as_u64()));
+            let memory_available = ByteSize::b(
+                self.memory_total
+                    .as_u64()
+                    .saturating_sub(self.memory_used.as_u64()),
+            );
             GpuState {
                 id: self.id,
                 memory_total: self.memory_total,

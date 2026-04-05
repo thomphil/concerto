@@ -24,7 +24,9 @@ pub fn select_evictions(
     // Greedily evict until we have enough space
     let mut freed: u64 = 0;
     let mut to_evict = Vec::new();
-    let deficit = total_needed.as_u64().saturating_sub(gpu.memory_available.as_u64());
+    let deficit = total_needed
+        .as_u64()
+        .saturating_sub(gpu.memory_available.as_u64());
 
     for candidate in candidates {
         if freed >= deficit {
@@ -84,12 +86,7 @@ mod tests {
             .with_model("model-a", 8, 8001)
             .build();
 
-        let result = select_evictions(
-            &gpu,
-            ByteSize::gb(8),
-            ByteSize::gb(1),
-            EvictionPolicy::Lru,
-        );
+        let result = select_evictions(&gpu, ByteSize::gb(8), ByteSize::gb(1), EvictionPolicy::Lru);
 
         assert_eq!(result, Some(vec![]));
     }
@@ -105,12 +102,7 @@ mod tests {
             .with_model_last_used("recent-model", 8, 8002, recent)
             .build();
 
-        let result = select_evictions(
-            &gpu,
-            ByteSize::gb(10),
-            ByteSize::gb(1),
-            EvictionPolicy::Lru,
-        );
+        let result = select_evictions(&gpu, ByteSize::gb(10), ByteSize::gb(1), EvictionPolicy::Lru);
 
         let evicted = result.expect("should have eviction plan");
         assert_eq!(evicted.len(), 1);
@@ -130,12 +122,7 @@ mod tests {
             .with_model_last_used("recent", 8, 8003, recent)
             .build();
 
-        let result = select_evictions(
-            &gpu,
-            ByteSize::gb(20),
-            ByteSize::gb(1),
-            EvictionPolicy::Lru,
-        );
+        let result = select_evictions(&gpu, ByteSize::gb(20), ByteSize::gb(1), EvictionPolicy::Lru);
 
         let evicted = result.expect("should have eviction plan");
         assert_eq!(evicted.len(), 3);
@@ -152,12 +139,7 @@ mod tests {
             .build();
 
         // Requesting more than the GPU's total memory
-        let result = select_evictions(
-            &gpu,
-            ByteSize::gb(30),
-            ByteSize::gb(1),
-            EvictionPolicy::Lru,
-        );
+        let result = select_evictions(&gpu, ByteSize::gb(30), ByteSize::gb(1), EvictionPolicy::Lru);
 
         assert!(result.is_none());
     }
@@ -175,12 +157,7 @@ mod tests {
         gpu.loaded_models[0].request_count = 1000;
         gpu.loaded_models[1].request_count = 5;
 
-        let result = select_evictions(
-            &gpu,
-            ByteSize::gb(10),
-            ByteSize::gb(1),
-            EvictionPolicy::Lfu,
-        );
+        let result = select_evictions(&gpu, ByteSize::gb(10), ByteSize::gb(1), EvictionPolicy::Lfu);
 
         let evicted = result.expect("should have eviction plan");
         assert_eq!(evicted[0], ModelId("unpopular".into()));
