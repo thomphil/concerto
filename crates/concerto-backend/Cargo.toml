@@ -2,5 +2,18 @@
 name = "concerto-backend"
 version.workspace = true
 edition.workspace = true
+description = "Backend process lifecycle for Concerto: BackendManager trait, mock implementation, and a real process-spawning implementation for inference engines."
 
 [dependencies]
+async-trait = { workspace = true }
+concerto-core = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+bytesize = { workspace = true }
+tokio = { workspace = true }
