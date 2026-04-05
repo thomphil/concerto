@@ -90,6 +90,9 @@ pub struct ModelSpec {
     pub vram_required: ByteSize,
     pub engine: EngineType,
     pub engine_args: Vec<String>,
+    /// If true, the model is protected from eviction regardless of policy.
+    #[serde(default)]
+    pub pin: bool,
 }
 
 /// Which inference engine to use for a model.

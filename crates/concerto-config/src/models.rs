@@ -28,6 +28,13 @@ pub struct ModelConfigEntry {
     /// Extra command-line arguments to pass to the engine.
     #[serde(default)]
     pub engine_args: Vec<String>,
+
+    /// Protect this model from eviction. Pinned models are never selected as
+    /// eviction candidates under any policy. If the only way to make room for
+    /// a new request would be to evict a pinned model, the request is rejected
+    /// with a clear reason instead.
+    #[serde(default)]
+    pub pin: bool,
 }
 
 impl From<&ModelConfigEntry> for ModelSpec {
@@ -39,6 +46,7 @@ impl From<&ModelConfigEntry> for ModelSpec {
             vram_required: entry.vram_required,
             engine: entry.engine.clone(),
             engine_args: entry.engine_args.clone(),
+            pin: entry.pin,
         }
     }
 }

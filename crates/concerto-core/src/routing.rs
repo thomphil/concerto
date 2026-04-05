@@ -34,6 +34,16 @@ pub fn route_request(
         }
     };
 
+    // Pin lookup used by every eviction attempt: a model is pinned iff its
+    // registry entry carries `pin = true`.
+    let is_pinned = |id: &ModelId| {
+        cluster
+            .model_registry
+            .get(id)
+            .map(|spec| spec.pin)
+            .unwrap_or(false)
+    };
+
     // 3. Find a GPU that can fit this model without eviction
     let candidates = cluster.gpus_with_space_for(spec.vram_required, config.vram_headroom);
     if let Some(best_gpu) = select_best_gpu(&candidates, config) {
@@ -43,14 +53,15 @@ pub fn route_request(
         };
     }
 
-    // 4. No GPU has enough free space — try eviction on each GPU
+    // 4. No GPU has enough free space — try eviction on each GPU (honouring pins)
     let healthy_gpus = cluster.healthy_gpus_by_available_memory();
-    for gpu in healthy_gpus {
+    for gpu in &healthy_gpus {
         if let Some(evictions) = select_evictions(
             gpu,
             spec.vram_required,
             config.vram_headroom,
             config.eviction_policy,
+            is_pinned,
         ) {
             if !evictions.is_empty() {
                 return RoutingDecision::LoadModel {
@@ -61,7 +72,22 @@ pub fn route_request(
         }
     }
 
-    // 5. Cannot serve — not enough memory even after eviction
+    // 5. Cannot serve. If the only reason we couldn't evict is that the
+    // blocking candidates were pinned, return a pin-specific reason so the
+    // caller can tell operators exactly what happened.
+    let pinned_blocker = healthy_gpus
+        .iter()
+        .any(|gpu| gpu.loaded_models.iter().any(|m| is_pinned(&m.model_id)));
+
+    if pinned_blocker {
+        return RoutingDecision::Reject {
+            reason: format!(
+                "Cannot load model '{}' (requires {}): all eligible eviction candidates are pinned",
+                model_id, spec.vram_required
+            ),
+        };
+    }
+
     RoutingDecision::Reject {
         reason: format!(
             "No GPU can fit model '{}' (requires {}), even after eviction",
@@ -113,6 +139,17 @@ mod tests {
         specs
             .into_iter()
             .map(|(id, vram_gb)| test_model_spec(id, vram_gb))
+            .collect()
+    }
+
+    fn make_registry_with_pins(specs: Vec<(&str, u64, bool)>) -> HashMap<ModelId, ModelSpec> {
+        specs
+            .into_iter()
+            .map(|(id, vram_gb, pin)| {
+                let (model_id, mut spec) = test_model_spec(id, vram_gb);
+                spec.pin = pin;
+                (model_id, spec)
+            })
             .collect()
     }
 
@@ -264,6 +301,62 @@ mod tests {
                 );
             }
             other => panic!("Expected LoadModel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_with_pin_reason_when_only_pinned_models_block_load() {
+        // 24 GB GPU, fully occupied by a single 20 GB pinned model.
+        // The request for `new-model` can only be served by evicting the
+        // pinned one — so the router must reject with a pin-specific reason.
+        let gpus = vec![GpuStateBuilder::new(0)
+            .memory_total_gb(24)
+            .with_model("pinned-big", 20, 8001)
+            .build()];
+        let registry =
+            make_registry_with_pins(vec![("pinned-big", 20, true), ("new-model", 10, false)]);
+        let cluster = ClusterState::new(gpus, registry);
+
+        let decision = route_request(&"new-model".into(), &cluster, &default_config());
+
+        match decision {
+            RoutingDecision::Reject { reason } => {
+                assert!(
+                    reason.contains("pinned"),
+                    "expected pin-specific reject reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Reject with pinned reason, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn evicts_non_pinned_model_even_if_pinned_is_lru() {
+        // A pinned model is the stalest loaded model on the GPU; LRU would
+        // normally evict it, but the pin must protect it.
+        let old = Utc::now() - Duration::hours(10);
+        let recent = Utc::now() - Duration::minutes(1);
+
+        let gpus = vec![GpuStateBuilder::new(0)
+            .memory_total_gb(24)
+            .with_model_last_used("pinned-stale", 10, 8001, old)
+            .with_model_last_used("recent", 10, 8002, recent)
+            .build()];
+        let registry = make_registry_with_pins(vec![
+            ("pinned-stale", 10, true),
+            ("recent", 10, false),
+            ("new-model", 10, false),
+        ]);
+        let cluster = ClusterState::new(gpus, registry);
+
+        let decision = route_request(&"new-model".into(), &cluster, &default_config());
+
+        match decision {
+            RoutingDecision::LoadModel { gpu_id, evict } => {
+                assert_eq!(gpu_id, GpuId(0));
+                assert_eq!(evict, vec![ModelId("recent".into())]);
+            }
+            other => panic!("expected LoadModel evicting 'recent', got {:?}", other),
         }
     }
 
