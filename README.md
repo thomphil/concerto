@@ -42,10 +42,12 @@ A v0.2 warm pool — keeping idle model processes resident in CPU RAM and resumi
 - [x] GPU telemetry (NVML + mock) with health classification
 - [x] Backend process management for vLLM, llama.cpp, SGLang
 - [x] TOML configuration
-- [ ] OpenAI-compatible HTTP API with SSE streaming
-- [ ] CLI binary with graceful shutdown
-- [ ] Prometheus metrics endpoint
-- [ ] End-to-end integration scenarios
+- [x] OpenAI-compatible HTTP API with SSE streaming
+- [x] CLI binary with graceful shutdown
+- [x] Prometheus metrics endpoint
+- [x] End-to-end integration scenarios
+- [ ] Real-hardware validation on rented GPUs (in flight)
+- [ ] Published container image and tagged v0.1.0 release
 
 ## Architecture
 

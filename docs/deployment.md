@@ -2,7 +2,7 @@
 
 How to run Concerto as a managed service on a single Linux host with 1–8 GPUs.
 
-> **Note:** This guide references features landing across Sprints 1–3. The `concerto` binary comes from Sprint 1. The `ghcr.io/thomphil/concerto` container image and `/metrics` endpoint land in Sprint 3. Examples are provided so operators can prepare ahead of time; verify every command against the version you are running with `concerto --version`.
+> **Note:** This guide references features landing across Sprints 1–3. The `concerto` binary and `/metrics` endpoint are available as of Sprint 2. The `ghcr.io/thomphil/concerto` container image lands in Sprint 3. Examples are provided so operators can prepare ahead of time; verify every command against the version you are running with `concerto --version`.
 
 ## Prerequisites
 
@@ -82,8 +82,7 @@ services:
     container_name: concerto
     restart: unless-stopped
     ports:
-      - "8000:8000"
-      # - "9090:9090"   # Prometheus metrics — lands in Sprint 3
+      - "8000:8000"   # OpenAI-compatible API + /metrics + /status
     volumes:
       - ./concerto.toml:/etc/concerto/concerto.toml:ro
       - /opt/models:/models:ro             # your pre-downloaded model weights
@@ -128,7 +127,7 @@ Run it under `tmux` or `screen` so it survives SSH disconnects. Not recommended 
 
 ## Prometheus scraping
 
-The `/metrics` endpoint lands in Sprint 3. Once it's available, a minimal Prometheus scrape config looks like:
+Concerto exposes a `/metrics` endpoint on the same HTTP port as the OpenAI-compatible API (no separate listener). A minimal Prometheus scrape config:
 
 ```yaml
 # /etc/prometheus/prometheus.yml (excerpt)
@@ -136,20 +135,23 @@ scrape_configs:
   - job_name: concerto
     scrape_interval: 15s
     static_configs:
-      - targets: ['concerto-host:9090']
+      - targets: ['concerto-host:8000']
     metrics_path: /metrics
 ```
 
-Core metrics planned for Sprint 3 (see ROADMAP §8):
+**Authentication:** the endpoint is unauthenticated in v0.1, matching the rest of the HTTP surface. If you don't want scrape access exposed alongside your inference API, bind to a private interface, put Concerto behind a reverse proxy, or use an `iptables` / firewall rule to restrict `/metrics` to your Prometheus host. Auth as an axum middleware layer lands in v0.2.
 
-- `concerto_requests_total` (counter, by decision: `loaded` / `loaded_after_load` / `rejected`)
-- `concerto_active_backends` (gauge, by engine)
-- `concerto_model_load_duration_seconds` (histogram)
-- `concerto_eviction_total` (counter)
-- `concerto_gpu_memory_used_bytes` (gauge, by gpu_id)
-- `concerto_gpu_memory_total_bytes` (gauge, by gpu_id)
-- `concerto_routing_decision_seconds` (histogram)
-- `concerto_backend_health_check_failures_total` (counter)
+Metrics currently emitted (see ROADMAP §8):
+
+- `concerto_requests_total` (counter, labelled by `decision`: `loaded` / `loaded_after_load` / `rejected_backend_unavailable` / `rejected_all_unhealthy` / `error`)
+- `concerto_backend_launches_total` (counter, per successful cold-start)
+- `concerto_eviction_total` (counter, per eviction performed while satisfying a cold-start)
+- `concerto_backend_health_check_failures_total` (counter, per backend dropped by the background health loop)
+- `concerto_routing_decision_seconds` (histogram of the pure-logic routing phase)
+- `concerto_model_load_duration_seconds` (histogram of cold-start + launch wall time; launcher path only, subscribers on the dedup channel do not double-count)
+- `concerto_active_backends` (gauge: number of live backends the orchestrator is tracking)
+- `concerto_gpu_memory_used_bytes` (gauge, labelled by `gpu` id; reflects Concerto's cluster bookkeeping, not the driver's ground truth — compare against `nvidia-smi` or a node exporter sample to detect drift)
+- `concerto_gpu_memory_total_bytes` (gauge, labelled by `gpu` id)
 
 ## Upgrading
 
