@@ -794,6 +794,19 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
                                         index,
                                     )
                                     break
+                                # Smoke gate: if the first step fails and
+                                # every request action got a 5xx, the
+                                # backend is fundamentally broken. Abort
+                                # early rather than burning through 240s
+                                # wait_for timeouts on every subsequent step.
+                                if index == 1 and _all_requests_5xx(requests):
+                                    logger.error(
+                                        "smoke gate: step 1 failed with all "
+                                        "requests returning 5xx — backend is "
+                                        "broken, aborting remaining steps"
+                                    )
+                                    exit_status = "error"
+                                    break
 
                     # After the pool exits every sampler has been
                     # cancelled, its teardown() has run, and its file
@@ -1456,11 +1469,20 @@ def _generate_config_from_scenario(
 
     lines.append("")
 
-    # Emit [[models]] from scenario
+    # Emit [[models]] from scenario. Rewrite weight_path relative to
+    # --models-dir when provided so the scenario can use portable paths
+    # like "/models/qwen2.5-0.5b" while the actual weights live at
+    # e.g. "/root/models/qwen2.5-0.5b" on the Vast.ai box.
     for model in scenario.models:
         lines.append("[[models]]")
         for key, value in model.items():
-            if isinstance(value, str):
+            if key == "weight_path" and isinstance(value, str) and options.models_dir is not None:
+                # Rewrite: take the last path component from the scenario
+                # and resolve it under --models-dir.
+                model_dir_name = Path(value).name
+                rewritten = str(options.models_dir / model_dir_name)
+                lines.append(f'{key} = "{rewritten}"')
+            elif isinstance(value, str):
                 lines.append(f'{key} = "{value}"')
             elif isinstance(value, list):
                 formatted_items = ", ".join(
@@ -1486,6 +1508,13 @@ def _generate_config_from_scenario(
         lines.append("")
 
     target.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _all_requests_5xx(requests: dict[str, RequestRecord]) -> bool:
+    """Return True if every captured request got a 5xx status code."""
+    if not requests:
+        return False
+    return all(r.status >= 500 for r in requests.values())
 
 
 def _detect_gpu_count() -> int:
