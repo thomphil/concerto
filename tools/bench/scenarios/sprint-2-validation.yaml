@@ -203,7 +203,7 @@ steps:
     actions:
       - wrk_load:
           concurrency: 20
-          duration_secs: 30
+          duration_secs: 300
           model: qwen2.5-7b
           content: "Explain quantum computing briefly."
 
