@@ -196,8 +196,8 @@ class RequestAction(BaseModel):
         description="Advisory expected HTTP status; mismatches set error, do not raise.",
     )
     timeout_secs: float = Field(
-        default=30.0,
-        description="Per-request wall-clock timeout in seconds.",
+        default=240.0,
+        description="Per-request wall-clock timeout in seconds. Default 240s to cover vLLM cold starts.",
     )
     capture_as: Optional[str] = Field(
         default=None,

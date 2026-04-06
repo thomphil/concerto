@@ -105,8 +105,8 @@ class WrkLoadAction(BaseModel):
         description="User message content for each request.",
     )
     timeout_secs: float = Field(
-        default=30.0,
-        description="Per-request timeout in seconds.",
+        default=240.0,
+        description="Per-request timeout in seconds. Default 240s to cover cold starts.",
     )
 
     @field_validator("duration_secs")
