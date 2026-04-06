@@ -187,6 +187,14 @@ pub(crate) fn default_health_path(engine: &EngineType) -> String {
     }
 }
 
+/// Resolve the Python interpreter for engines that launch via `python -m …`.
+///
+/// Checks `CONCERTO_PYTHON` first so operators can point at a virtualenv
+/// (e.g. `/root/vllm-venv/bin/python`). Falls back to plain `"python"`.
+fn python_binary() -> String {
+    std::env::var("CONCERTO_PYTHON").unwrap_or_else(|_| "python".to_string())
+}
+
 /// Build (but do not spawn) the [`Command`] that would launch a backend for
 /// `spec` on `gpu_id`, listening on `port`.
 ///
@@ -199,12 +207,14 @@ pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
 
     let mut command = match &spec.engine {
         EngineType::Vllm => {
-            let mut c = Command::new("python");
+            let mut c = Command::new(python_binary());
             c.args([
                 "-m",
                 "vllm.entrypoints.openai.api_server",
                 "--model",
                 weight,
+                "--served-model-name",
+                &spec.id.0,
                 "--port",
                 &port_str,
             ]);
@@ -216,12 +226,14 @@ pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
             c
         }
         EngineType::Sglang => {
-            let mut c = Command::new("python");
+            let mut c = Command::new(python_binary());
             c.args([
                 "-m",
                 "sglang.launch_server",
                 "--model-path",
                 weight,
+                "--served-model-name",
+                &spec.id.0,
                 "--port",
                 &port_str,
             ]);

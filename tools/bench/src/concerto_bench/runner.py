@@ -561,7 +561,7 @@ class RunnerOptions(BaseModel):
         ),
     )
     startup_timeout_secs: float = Field(
-        default=30.0,
+        default=60.0,
         gt=0.0,
         description="Deadline for concerto's ``/health`` gate in seconds.",
     )
@@ -571,11 +571,12 @@ class RunnerOptions(BaseModel):
         description="SIGTERM → SIGKILL grace window for the concerto child.",
     )
     http_timeout_secs: float = Field(
-        default=30.0,
+        default=240.0,
         gt=0.0,
         description=(
             "Default timeout on the long-lived httpx client the runner "
-            "threads through every request + snapshot primitive invocation."
+            "threads through every request + snapshot primitive invocation. "
+            "Must exceed vLLM cold-start time on real hardware."
         ),
     )
     stable_started_at: Optional[datetime] = Field(

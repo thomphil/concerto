@@ -45,6 +45,9 @@ fn env(cmd: &Command, key: &str) -> Option<String> {
 
 #[test]
 fn vllm_command_shape() {
+    // Clear any override so the default path is exercised.
+    std::env::remove_var("CONCERTO_PYTHON");
+
     let spec = spec_with_engine(
         EngineType::Vllm,
         vec!["--dtype", "float16", "--max-model-len", "4096"],
@@ -57,6 +60,8 @@ fn vllm_command_shape() {
     assert!(args.contains(&"vllm.entrypoints.openai.api_server".to_string()));
     assert!(args.contains(&"--model".to_string()));
     assert!(args.contains(&"/models/test-model".to_string()));
+    assert!(args.contains(&"--served-model-name".to_string()));
+    assert!(args.contains(&"test-model".to_string()));
     assert!(args.contains(&"--port".to_string()));
     assert!(args.contains(&"8123".to_string()));
     // Engine args are appended verbatim.
@@ -64,6 +69,23 @@ fn vllm_command_shape() {
     assert!(args.contains(&"float16".to_string()));
     assert!(args.contains(&"--max-model-len".to_string()));
     assert!(args.contains(&"4096".to_string()));
+}
+
+#[test]
+fn concerto_python_env_overrides_vllm_binary() {
+    std::env::set_var("CONCERTO_PYTHON", "/root/vllm-venv/bin/python");
+
+    let spec = spec_with_engine(EngineType::Vllm, vec![]);
+    let cmd = build_command(&spec, GpuId(0), 8123);
+    assert_eq!(program(&cmd), "/root/vllm-venv/bin/python");
+
+    // SGLang also uses the override.
+    let sglang_spec = spec_with_engine(EngineType::Sglang, vec![]);
+    let sglang_cmd = build_command(&sglang_spec, GpuId(0), 8124);
+    assert_eq!(program(&sglang_cmd), "/root/vllm-venv/bin/python");
+
+    // Clean up to avoid polluting other tests.
+    std::env::remove_var("CONCERTO_PYTHON");
 }
 
 #[test]
@@ -84,6 +106,8 @@ fn llama_cpp_command_uses_short_m_flag() {
 
 #[test]
 fn sglang_command_uses_model_path_flag() {
+    std::env::remove_var("CONCERTO_PYTHON");
+
     let spec = spec_with_engine(EngineType::Sglang, vec![]);
     let cmd = build_command(&spec, GpuId(2), 8300);
 
@@ -92,6 +116,8 @@ fn sglang_command_uses_model_path_flag() {
     assert!(args.contains(&"sglang.launch_server".to_string()));
     assert!(args.contains(&"--model-path".to_string()));
     assert!(args.contains(&"/models/test-model".to_string()));
+    assert!(args.contains(&"--served-model-name".to_string()));
+    assert!(args.contains(&"test-model".to_string()));
     assert!(args.contains(&"--port".to_string()));
     assert!(args.contains(&"8300".to_string()));
 }
