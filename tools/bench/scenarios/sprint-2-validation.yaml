@@ -60,7 +60,7 @@ models:
     weight_path: "/models/qwen2.5-7b"
     vram_required: "14GB"
     engine: vllm
-    engine_args: ["--dtype", "float16", "--max-model-len", "4096", "--gpu-memory-utilization", "0.95", "--enforce-eager"]
+    engine_args: ["--dtype", "float16", "--max-model-len", "2048", "--gpu-memory-utilization", "0.99", "--enforce-eager"]
 
 # --------------------------------------------------------------------------
 # Samplers (all 5, at 1 Hz)
