@@ -203,6 +203,7 @@ async fn do_launch(
     evict: Vec<ModelId>,
 ) -> Result<BackendTarget, ApiError> {
     // --- 3. Evict any models the router asked us to evict. ---------------
+    let mut evicted_any = false;
     for victim in &evict {
         let handle = {
             let mut backends = state.backends.lock().await;
@@ -213,9 +214,20 @@ async fn do_launch(
             if let Err(e) = state.backend.stop(&handle).await {
                 warn!(%victim, error = %e, "stop failed during eviction; continuing");
             }
+            evicted_any = true;
         }
         remove_loaded_model(state, victim).await;
         counter!(EVICTION_TOTAL).increment(1);
+    }
+
+    // Inference engines (especially vLLM) spawn child processes that may
+    // hold GPU memory briefly after the main process is killed. Give the
+    // OS a moment to reclaim CUDA resources before launching a new
+    // backend on the same GPU.
+    // TODO: replace with process-group kill (nix::sys::signal::killpg)
+    // so we don't need a fixed delay.
+    if evicted_any {
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 
     // --- 4. Look up the model spec we're about to launch. ----------------
