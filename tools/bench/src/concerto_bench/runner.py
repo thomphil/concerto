@@ -1474,14 +1474,33 @@ def _generate_config_from_scenario(
                 lines.append(f"{key} = {value}")
         lines.append("")
 
-    # Emit [[gpus]] for mock mode
+    # Emit [[gpus]] — concerto requires at least one.
     if options.mock_gpus:
-        for i in range(options.mock_gpus):
-            lines.append("[[gpus]]")
-            lines.append(f"id = {i}")
-            lines.append("")
+        gpu_count = options.mock_gpus
+    else:
+        # Detect GPU count via nvidia-smi for real hardware.
+        gpu_count = _detect_gpu_count()
+    for i in range(gpu_count):
+        lines.append("[[gpus]]")
+        lines.append(f"id = {i}")
+        lines.append("")
 
     target.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _detect_gpu_count() -> int:
+    """Detect the number of GPUs via ``nvidia-smi``. Falls back to 2."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            count = len([l for l in result.stdout.strip().splitlines() if l.strip()])
+            return max(count, 1)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return 2
 
 
 def _find_concerto_example(binary: Path) -> Optional[Path]:
