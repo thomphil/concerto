@@ -220,14 +220,11 @@ async fn do_launch(
         counter!(EVICTION_TOTAL).increment(1);
     }
 
-    // Inference engines (especially vLLM) spawn child processes that may
-    // hold GPU memory briefly after the main process is killed. Give the
-    // OS a moment to reclaim CUDA resources before launching a new
-    // backend on the same GPU.
-    // TODO: replace with process-group kill (nix::sys::signal::killpg)
-    // so we don't need a fixed delay.
+    // Brief pause after eviction so the kernel reclaims GPU memory from
+    // killed child processes. The backend stop() already kills the
+    // process tree, but CUDA resource teardown is asynchronous.
     if evicted_any {
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     // --- 4. Look up the model spec we're about to launch. ----------------

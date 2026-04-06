@@ -149,9 +149,10 @@ impl BackendManager for ProcessBackendManager {
     async fn stop(&self, handle: &BackendHandle) -> Result<(), BackendError> {
         if let Some(mut child) = self.children.write().await.remove(&handle.pid) {
             info!(pid = handle.pid, port = handle.port, "stopping backend");
-            // tokio::process::Child::kill sends SIGKILL on Unix; a cleaner
-            // SIGTERM-first shutdown would need libc/nix. SIGKILL is
-            // adequate for MVP — inference engines do no persistent work.
+            // Kill child processes first (e.g. vLLM EngineCore workers that
+            // hold GPU memory). Without this, SIGKILL on the parent orphans
+            // the children and they keep GPU memory allocated indefinitely.
+            kill_process_tree(handle.pid).await;
             child.kill().await?;
             let _ = child.wait().await;
         } else {
@@ -170,6 +171,37 @@ impl BackendManager for ProcessBackendManager {
             .map(|resp| resp.status().is_success())
             .unwrap_or(false)
     }
+}
+
+/// Recursively kill all descendant processes of `pid` using `pkill -9 -P`.
+///
+/// Inference engines (vLLM in particular) spawn child processes that hold GPU
+/// memory. If we only SIGKILL the parent, those children become orphans and
+/// keep GPU resources allocated. This function walks the tree bottom-up so
+/// children release their resources before the parent exits.
+async fn kill_process_tree(pid: u32) {
+    // Use `pkill -9 -P <pid>` to kill direct children. vLLM's process tree
+    // is typically only two levels deep (APIServer → EngineCore), so one
+    // pass is sufficient for the MVP. Errors are non-fatal — the children
+    // may already be gone.
+    let result = Command::new("pkill")
+        .args(["-9", "-P", &pid.to_string()])
+        .output()
+        .await;
+    match result {
+        Ok(output) if output.status.success() => {
+            debug!(parent_pid = pid, "killed child processes");
+        }
+        Ok(_) => {
+            // pkill returns 1 if no processes matched — that's fine.
+            debug!(parent_pid = pid, "no child processes to kill");
+        }
+        Err(e) => {
+            warn!(parent_pid = pid, error = %e, "pkill failed; child processes may leak");
+        }
+    }
+    // Brief pause so the kernel can reclaim GPU resources from killed children.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
 fn health_url(port: u16, path: &str) -> String {
