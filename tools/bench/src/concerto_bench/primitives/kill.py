@@ -89,6 +89,14 @@ class KillAction(BaseModel):
         default=True,
         description="If True and no process matches, mark as failure.",
     )
+    kill_children: bool = Field(
+        default=False,
+        description=(
+            "If True, also kill direct child processes of each matched PID "
+            "via pkill -P before killing the parent. Needed for engines like "
+            "vLLM that spawn EngineCore child processes holding GPU memory."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +191,28 @@ class KillPrimitive:
 
         if not pids_found and action.expect_found:
             errors.append(f"no process matched pattern {action.pattern!r}")
+
+        # Kill children first if requested (e.g. vLLM EngineCore workers
+        # that hold GPU memory and won't die when the parent is killed).
+        if action.kill_children and pids_found:
+            for pid in pids_found:
+                try:
+                    child_proc = await asyncio.create_subprocess_exec(
+                        "pkill",
+                        f"-{action.signal}",
+                        "-P",
+                        str(pid),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await child_proc.communicate()
+                    logger.debug(
+                        "kill primitive: killed children of PID %d", pid
+                    )
+                except FileNotFoundError:
+                    logger.warning("kill primitive: pkill not found, cannot kill children")
+            # Brief pause for GPU memory teardown.
+            await asyncio.sleep(1)
 
         # Send signal to each PID
         for pid in pids_found:

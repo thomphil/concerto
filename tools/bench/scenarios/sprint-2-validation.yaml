@@ -224,6 +224,7 @@ steps:
       - kill:
           pattern: "python.*vllm.*phi-3"
           signal: 9
+          kill_children: true
       # Wait long enough for concerto's health check (10s interval) to
       # detect the crash and mark the backend as dead.
       - wait:
