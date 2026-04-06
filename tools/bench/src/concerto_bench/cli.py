@@ -1,20 +1,15 @@
 """Typer CLI surface for the Concerto bench rig.
 
-Phase B.1 scope: define the full subcommand list with the option
-surfaces documented in SPRINT-2-PLAN §4 B.1 / B.2, but leave each
-command body as a stub that exits with a clear ``not implemented``
-message. This gives subsequent Phase B steps a stable entry point to
-hang real behaviour off without having to reshape the CLI.
-
-Subcommand stubs are intentionally not ``NotImplementedError`` raises —
-they return exit code 2 (``EX_USAGE``-adjacent) with a message naming
-the Phase B sub-step that will land the behaviour. This keeps
-``--help`` honest while making accidental invocations obviously
-incomplete rather than crashing with a traceback.
+Subcommands: ``run``, ``dry-run``, ``summarize``, ``verify-weights``,
+``estimate``. Each drives a specific workflow documented in
+SPRINT-2-PLAN §4 B.2.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
@@ -35,26 +30,23 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-
-# Exit code used by stubs to signal "this command is declared but not
-# yet implemented". Distinct from 0 (success) and 1 (usage/runtime
-# error) so CI can tell the difference if we ever accidentally wire a
-# stub into a real code path.
-_EXIT_NOT_IMPLEMENTED = 64
-
-
-def _stub(command: str, phase: str) -> None:
-    typer.echo(
-        f"concerto-bench {command}: not implemented yet (lands in {phase}).",
-        err=True,
-    )
-    raise typer.Exit(code=_EXIT_NOT_IMPLEMENTED)
+logger = logging.getLogger(__name__)
 
 
 def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"concerto-bench {__version__}")
         raise typer.Exit()
+
+
+def _configure_logging(level: str) -> None:
+    """Set up basic logging at the requested verbosity."""
+    numeric = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=numeric,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 
 @app.callback()
@@ -70,17 +62,23 @@ def _root(
     """Root callback. All real work happens in subcommands."""
 
 
+# ---------------------------------------------------------------------------
+# run
+# ---------------------------------------------------------------------------
+
+
 @app.command("run")
 def run_cmd(
     scenario: Path = typer.Option(
         ...,
         "--scenario",
-        exists=False,  # validation happens once the runner lands
+        exists=True,
         help="Path to the scenario YAML to execute.",
     ),
     concerto_bin: Path = typer.Option(
         ...,
         "--concerto-bin",
+        exists=True,
         help="Path to the concerto release binary to exercise.",
     ),
     output: Path = typer.Option(
@@ -92,6 +90,11 @@ def run_cmd(
         None,
         "--models-dir",
         help="Directory containing pre-downloaded model weights.",
+    ),
+    config_override: Optional[Path] = typer.Option(
+        None,
+        "--concerto-config",
+        help="Override path to concerto.toml config file.",
     ),
     log_level: str = typer.Option(
         "info",
@@ -105,7 +108,35 @@ def run_cmd(
     built locally on the host, weights pre-downloaded, and the rig's
     job is to drive the scenario end-to-end and package the artifact.
     """
-    _stub("run", "Phase B.10")
+    _configure_logging(log_level)
+
+    from concerto_bench.runner import RunnerOptions, run_scenario
+
+    options = RunnerOptions(
+        scenario_path=scenario.resolve(),
+        output_dir=output.resolve(),
+        concerto_bin=concerto_bin.resolve(),
+        models_dir=models_dir.resolve() if models_dir else None,
+        concerto_config_override=config_override.resolve() if config_override else None,
+        concerto_log_level=log_level if log_level in ("debug", "info", "warn", "error") else "info",
+        concerto_log_format="json",
+    )
+
+    result = asyncio.run(run_scenario(options))
+
+    if result.artifact is not None:
+        typer.echo(f"Artifact: {result.artifact.tarball_path}")
+    typer.echo(f"Exit status: {result.manifest.exit_status}")
+
+    if result.summary.failed_step_names:
+        typer.echo(f"Failed steps: {', '.join(result.summary.failed_step_names)}", err=True)
+
+    raise typer.Exit(code=result.exit_code)
+
+
+# ---------------------------------------------------------------------------
+# dry-run
+# ---------------------------------------------------------------------------
 
 
 @app.command("dry-run")
@@ -113,6 +144,7 @@ def dry_run_cmd(
     scenario: Path = typer.Option(
         ...,
         "--scenario",
+        exists=True,
         help="Path to the scenario YAML to execute.",
     ),
     output: Path = typer.Option(
@@ -127,15 +159,57 @@ def dry_run_cmd(
         max=8,
         help="Number of mock GPUs to spawn concerto with (mock upstream).",
     ),
+    log_level: str = typer.Option(
+        "info",
+        "--log-level",
+        help="Rig log verbosity (debug|info|warn|error).",
+    ),
 ) -> None:
     """Execute a scenario locally against mock-inference-backend.
 
-    This is the CI regression gate — it spawns a local concerto with
+    This is the CI regression gate -- it spawns a local concerto with
     ``--mock-gpus`` pointed at the bundled mock upstream, runs the
     scenario, and produces an artifact. The tarball shape is what the
     CI test asserts on.
     """
-    _stub("dry-run", "Phase B.12")
+    _configure_logging(log_level)
+
+    from concerto_bench.runner import RunnerOptions, run_scenario
+
+    # Locate the concerto binary from a cargo build.
+    concerto_bin = _find_concerto_binary()
+    if concerto_bin is None:
+        typer.echo(
+            "Could not locate concerto binary. Run `cargo build` first, "
+            "or use `--concerto-bin` via the `run` subcommand.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    options = RunnerOptions(
+        scenario_path=scenario.resolve(),
+        output_dir=output.resolve(),
+        concerto_bin=concerto_bin,
+        mock_gpus=mock_gpus,
+        concerto_log_level=log_level if log_level in ("debug", "info", "warn", "error") else "info",
+        concerto_log_format="json",
+    )
+
+    result = asyncio.run(run_scenario(options))
+
+    if result.artifact is not None:
+        typer.echo(f"Artifact: {result.artifact.tarball_path}")
+    typer.echo(f"Exit status: {result.manifest.exit_status}")
+
+    if result.summary.failed_step_names:
+        typer.echo(f"Failed steps: {', '.join(result.summary.failed_step_names)}", err=True)
+
+    raise typer.Exit(code=result.exit_code)
+
+
+# ---------------------------------------------------------------------------
+# summarize
+# ---------------------------------------------------------------------------
 
 
 @app.command("summarize")
@@ -154,7 +228,23 @@ def summarize_cmd(
     ),
 ) -> None:
     """Render an artifact tarball into a human-readable markdown summary."""
-    _stub("summarize", "Phase B.11")
+    from concerto_bench.analyze.summarize import SummarizeError, summarize_artifact
+
+    try:
+        markdown = summarize_artifact(artifact, output=output)
+    except SummarizeError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+    if output is None:
+        typer.echo(markdown)
+    else:
+        typer.echo(f"Summary written to {output}")
+
+
+# ---------------------------------------------------------------------------
+# verify-weights
+# ---------------------------------------------------------------------------
 
 
 @app.command("verify-weights")
@@ -162,6 +252,7 @@ def verify_weights_cmd(
     models_dir: Path = typer.Option(
         ...,
         "--models-dir",
+        exists=True,
         help="Directory containing the pre-downloaded model weights.",
     ),
     checksums: Optional[Path] = typer.Option(
@@ -179,7 +270,57 @@ def verify_weights_cmd(
     between Sprint 2 runs. Used by the remote bootstrap script and
     locally when adding a new model to a scenario.
     """
-    _stub("verify-weights", "Phase B.15")
+    import hashlib
+
+    checksums_path = checksums
+    if checksums_path is None:
+        checksums_path = _find_fixtures_dir() / "weight-checksums.json"
+    if not checksums_path.is_file():
+        typer.echo(f"Checksums file not found: {checksums_path}", err=True)
+        raise typer.Exit(code=2)
+
+    manifest = json.loads(checksums_path.read_text(encoding="utf-8"))
+    models = manifest.get("models", {})
+    if not models:
+        typer.echo("No models in checksums manifest.", err=True)
+        raise typer.Exit(code=2)
+
+    all_ok = True
+    for model_id, file_checksums in models.items():
+        model_path = models_dir / model_id
+        if not model_path.is_dir():
+            typer.echo(f"  MISSING  {model_id}/ — directory not found", err=True)
+            all_ok = False
+            continue
+        for relative_file, expected_sha in file_checksums.items():
+            file_path = model_path / relative_file
+            if not file_path.is_file():
+                typer.echo(f"  MISSING  {model_id}/{relative_file}", err=True)
+                all_ok = False
+                continue
+            actual_sha = _sha256_file(file_path)
+            if actual_sha == expected_sha:
+                typer.echo(f"  OK       {model_id}/{relative_file}")
+            else:
+                typer.echo(
+                    f"  MISMATCH {model_id}/{relative_file}\n"
+                    f"           expected: {expected_sha}\n"
+                    f"           actual:   {actual_sha}",
+                    err=True,
+                )
+                all_ok = False
+
+    if all_ok:
+        typer.echo("All weight checksums verified.")
+        raise typer.Exit(code=0)
+    else:
+        typer.echo("Some checksums failed or files are missing.", err=True)
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# estimate
+# ---------------------------------------------------------------------------
 
 
 @app.command("estimate")
@@ -187,6 +328,7 @@ def estimate_cmd(
     scenario: Path = typer.Option(
         ...,
         "--scenario",
+        exists=True,
         help="Path to the scenario YAML to estimate.",
     ),
     gpu_profile: str = typer.Option(
@@ -202,10 +344,112 @@ def estimate_cmd(
 ) -> None:
     """Forecast wall-clock time and cost for a scenario.
 
-    Local-only; does not hit the Vast.ai API. Heuristics live in the
-    rig and are refined from measured dry-run wall times.
+    Local-only; does not hit the Vast.ai API. Heuristics are refined
+    from measured dry-run wall times and GPU-type multipliers.
     """
-    _stub("estimate", "Phase B.16")
+    from concerto_bench.runner import load_scenario
+
+    scenario_obj = load_scenario(scenario)
+
+    # Heuristic time estimates per action type (seconds). These are
+    # rough estimates based on dry-run observations with mock backends;
+    # real vLLM times are multiplied by the gpu_multiplier below.
+    action_time: dict[str, float] = {
+        "request": 5.0,
+        "snapshot": 1.0,
+        "wait": 0.0,  # uses its own duration_secs
+        "wait_for": 30.0,
+        "kill": 2.0,
+        "assert": 1.0,
+        "wrk_load": 0.0,  # uses its own duration_secs
+        "parallel": 30.0,
+    }
+    # GPU multiplier: real hardware is slower than mock for cold starts
+    gpu_multipliers: dict[str, float] = {
+        "2xRTX_A4000": 3.0,
+        "1xRTX_A4000": 4.0,
+        "2xRTX_3090": 2.5,
+        "1xA100_40GB": 1.5,
+    }
+    multiplier = gpu_multipliers.get(gpu_profile, 3.0)
+
+    estimated_secs = 0.0
+    for step in scenario_obj.steps:
+        for action in step.actions:
+            base = action_time.get(action.type, 5.0)
+            # Use the action's own duration if it specifies one
+            if action.type == "wait":
+                base = action.args.get("duration_secs", 1.0)
+            elif action.type == "wrk_load":
+                base = action.args.get("duration_secs", 60.0)
+            elif action.type == "wait_for":
+                base = min(action.args.get("timeout_secs", 60.0), 60.0)
+            estimated_secs += base
+
+    # Apply GPU multiplier for cold-start-heavy actions
+    estimated_secs *= multiplier
+    # Add bootstrap overhead (15 min for first run)
+    bootstrap_secs = 15 * 60
+    total_secs = estimated_secs + bootstrap_secs
+    hours = total_secs / 3600
+    cost_gbp = hours * hourly_rate_gbp
+
+    typer.echo(f"Scenario: {scenario_obj.name} v{scenario_obj.version}")
+    typer.echo(f"Steps: {len(scenario_obj.steps)}")
+    typer.echo(f"GPU profile: {gpu_profile} (multiplier: {multiplier:.1f}x)")
+    typer.echo(f"Estimated scenario time: {estimated_secs / 60:.1f} min")
+    typer.echo(f"Estimated total (incl. bootstrap): {total_secs / 60:.1f} min")
+    typer.echo(f"Estimated cost: £{cost_gbp:.2f} (at £{hourly_rate_gbp:.2f}/hr)")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _find_concerto_binary() -> Optional[Path]:
+    """Locate the concerto binary from a cargo build.
+
+    Searches debug then release target directories, walking up from cwd
+    to find the repo root.
+    """
+    for parent in [Path.cwd(), *Path.cwd().parents]:
+        for profile in ("debug", "release"):
+            candidate = parent / "target" / profile / "concerto"
+            if candidate.is_file():
+                return candidate
+        # Stop at repo root
+        if (parent / "Cargo.toml").is_file():
+            break
+    return None
+
+
+def _find_fixtures_dir() -> Path:
+    """Locate the fixtures/ directory relative to this package."""
+    # Walk up from the package source to find tools/bench/fixtures/
+    pkg_dir = Path(__file__).resolve().parent
+    for parent in [pkg_dir, *pkg_dir.parents]:
+        candidate = parent / "fixtures"
+        if candidate.is_dir() and (candidate / "weight-checksums.json").exists():
+            return candidate
+        # Also check tools/bench/fixtures from the repo root
+        if (parent / "Cargo.toml").is_file():
+            bench_fixtures = parent / "tools" / "bench" / "fixtures"
+            if bench_fixtures.is_dir():
+                return bench_fixtures
+            break
+    return pkg_dir.parent.parent.parent / "fixtures"
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def main() -> None:

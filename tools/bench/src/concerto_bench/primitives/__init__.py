@@ -21,6 +21,20 @@ share the same broad contract: stateless execution, strict pydantic
 
 from __future__ import annotations
 
+from concerto_bench.primitives.assertions import (
+    AssertAction,
+    AssertError,
+    AssertPrimitive,
+)
+from concerto_bench.primitives.kill import (
+    KillAction,
+    KillError,
+    KillPrimitive,
+)
+from concerto_bench.primitives.parallel import (
+    ParallelAction,
+    ParallelPrimitive,
+)
 from concerto_bench.primitives.request import (
     RequestAction,
     RequestError,
@@ -31,12 +45,40 @@ from concerto_bench.primitives.snapshot import (
     SnapshotError,
     SnapshotPrimitive,
 )
+from concerto_bench.primitives.wait import (
+    WaitAction,
+    WaitPrimitive,
+)
+from concerto_bench.primitives.wait_for import (
+    WaitForAction,
+    WaitForError,
+    WaitForPrimitive,
+)
+from concerto_bench.primitives.wrk_load import (
+    WrkLoadAction,
+    WrkLoadPrimitive,
+)
 
 __all__ = [
+    "AssertAction",
+    "AssertError",
+    "AssertPrimitive",
+    "KillAction",
+    "KillError",
+    "KillPrimitive",
+    "ParallelAction",
+    "ParallelPrimitive",
     "RequestAction",
     "RequestError",
     "RequestPrimitive",
     "SnapshotAction",
     "SnapshotError",
     "SnapshotPrimitive",
+    "WaitAction",
+    "WaitPrimitive",
+    "WaitForAction",
+    "WaitForError",
+    "WaitForPrimitive",
+    "WrkLoadAction",
+    "WrkLoadPrimitive",
 ]

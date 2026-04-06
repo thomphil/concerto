@@ -44,9 +44,27 @@ from concerto_bench.runner import (
     load_scenario,
 )
 from concerto_bench.primitives import (
+    AssertPrimitive,
+    KillPrimitive,
+    ParallelPrimitive,
     RequestPrimitive,
     SnapshotPrimitive,
+    WaitPrimitive,
+    WaitForPrimitive,
+    WrkLoadPrimitive,
 )
+
+# Shared primitive keyword arguments for _execute_step calls. Every test
+# that drives _execute_step must pass these so the runner's dispatch
+# table has all six new primitives available.
+_EXTRA_PRIMITIVES = {
+    "wait_primitive": WaitPrimitive(),
+    "wait_for_primitive": WaitForPrimitive(),
+    "kill_primitive": KillPrimitive(),
+    "assert_primitive": AssertPrimitive(),
+    "wrk_load_primitive": WrkLoadPrimitive(),
+    "parallel_primitive": ParallelPrimitive(),
+}
 from concerto_bench.schema import (
     StateSnapshot,
     StepResult,
@@ -304,6 +322,7 @@ async def test_execute_step_happy_path() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -340,6 +359,7 @@ async def test_execute_step_with_capture_as() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -369,6 +389,7 @@ async def test_execute_step_records_request_error_as_failure() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -402,6 +423,7 @@ async def test_execute_step_connect_error_records_failure() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -425,6 +447,7 @@ async def test_execute_step_snapshot_action() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -449,6 +472,7 @@ async def test_execute_step_pre_state_path_matches_slug() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -476,6 +500,7 @@ async def test_execute_step_multiple_actions() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -510,6 +535,7 @@ async def test_execute_step_failed_pre_snapshot_marks_step_failed() -> None:
             client=client,
             request_primitive=RequestPrimitive(),
             snapshot_primitive=SnapshotPrimitive(),
+            **_EXTRA_PRIMITIVES,
         )
     finally:
         await client.aclose()
@@ -681,10 +707,10 @@ def test_summary_error_status_is_not_passed() -> None:
 def test_action_spec_rejects_unknown_type() -> None:
     """ActionSpec validates the type against the supported set."""
     with pytest.raises(Exception, match="unknown action type"):
-        ActionSpec(type="kill", args={})
+        ActionSpec(type="nonexistent_action", args={})
 
 
 def test_action_spec_accepts_known_types() -> None:
-    """ActionSpec accepts request and snapshot."""
-    assert ActionSpec(type="request", args={}).type == "request"
-    assert ActionSpec(type="snapshot", args={}).type == "snapshot"
+    """ActionSpec accepts all supported action types."""
+    for action_type in ("request", "snapshot", "wait", "wait_for", "kill", "assert", "wrk_load", "parallel"):
+        assert ActionSpec(type=action_type, args={}).type == action_type

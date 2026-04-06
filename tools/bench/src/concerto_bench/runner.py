@@ -112,10 +112,22 @@ from concerto_bench.concerto_proc import (
     pick_free_port,
 )
 from concerto_bench.primitives import (
+    AssertAction,
+    AssertPrimitive,
+    KillAction,
+    KillPrimitive,
+    ParallelAction,
+    ParallelPrimitive,
     RequestAction,
     RequestPrimitive,
     SnapshotAction,
     SnapshotPrimitive,
+    WaitAction,
+    WaitPrimitive,
+    WaitForAction,
+    WaitForPrimitive,
+    WrkLoadAction,
+    WrkLoadPrimitive,
 )
 from concerto_bench.samplers import (
     DEFAULT_REGISTRY,
@@ -150,10 +162,10 @@ UTC = timezone.utc
 LogLevel = Literal["debug", "info", "warn", "error"]
 LogFormat = Literal["pretty", "json"]
 
-# Primitives accepted by the v1 runner. Wait/wait_for/kill/parallel/
-# assertions land in later Phase B.2 steps; unknown action types fail
-# at scenario-parse time with a clear error pointing at this list.
-_SUPPORTED_ACTION_TYPES: frozenset[str] = frozenset({"request", "snapshot"})
+_SUPPORTED_ACTION_TYPES: frozenset[str] = frozenset({
+    "request", "snapshot", "wait", "wait_for", "kill",
+    "assert", "wrk_load", "parallel",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -659,7 +671,7 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
     # we copy ``concerto.example.toml`` into the artifact tree so the
     # run is fully self-contained — future analyses can see exactly
     # which config concerto was handed.
-    config_path = _resolve_concerto_config(options, builder.root_dir)
+    config_path = _resolve_concerto_config(options, builder.root_dir, scenario)
 
     # Concerto log files need a location that is not tarred twice.
     # We give concerto a sibling directory next to output_dir so the
@@ -730,6 +742,12 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
                 ) as client:
                     request_primitive = RequestPrimitive()
                     snapshot_primitive = SnapshotPrimitive()
+                    wait_primitive = WaitPrimitive()
+                    wait_for_primitive = WaitForPrimitive()
+                    kill_primitive = KillPrimitive()
+                    assert_primitive = AssertPrimitive()
+                    wrk_load_primitive = WrkLoadPrimitive()
+                    parallel_primitive = ParallelPrimitive()
 
                     samplers = _build_samplers(
                         specs=scenario.samplers,
@@ -746,6 +764,12 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
                                 client=client,
                                 request_primitive=request_primitive,
                                 snapshot_primitive=snapshot_primitive,
+                                wait_primitive=wait_primitive,
+                                wait_for_primitive=wait_for_primitive,
+                                kill_primitive=kill_primitive,
+                                assert_primitive=assert_primitive,
+                                wrk_load_primitive=wrk_load_primitive,
+                                parallel_primitive=parallel_primitive,
                             )
                             try:
                                 builder.write_step(
@@ -898,6 +922,12 @@ async def _execute_step(
     client: httpx.AsyncClient,
     request_primitive: RequestPrimitive,
     snapshot_primitive: SnapshotPrimitive,
+    wait_primitive: WaitPrimitive,
+    wait_for_primitive: WaitForPrimitive,
+    kill_primitive: KillPrimitive,
+    assert_primitive: AssertPrimitive,
+    wrk_load_primitive: WrkLoadPrimitive,
+    parallel_primitive: ParallelPrimitive,
 ) -> tuple[StepResult, StateSnapshot, StateSnapshot, dict[str, RequestRecord]]:
     """Run one scenario step and produce the four records it generates.
 
@@ -959,10 +989,99 @@ async def _execute_step(
                 output = {"snapshot": snap.model_dump(mode="json")}
                 passed = True
                 failure_reason = None
+            elif action_spec.type == "wait":
+                wait_action = WaitAction.model_validate(action_spec.args)
+                wait_result = await wait_primitive.execute(
+                    wait_action, base_url=base_url, client=client
+                )
+                output = wait_result
+                passed = True
+                failure_reason = None
+            elif action_spec.type == "wait_for":
+                wf_action = WaitForAction.model_validate(action_spec.args)
+                wf_result = await wait_for_primitive.execute(
+                    wf_action, base_url=base_url, client=client
+                )
+                output = wf_result
+                passed = wf_result.get("satisfied", False)
+                failure_reason = (
+                    None if passed
+                    else f"wait_for condition not satisfied after {wf_result.get('elapsed_secs', '?')}s"
+                )
+            elif action_spec.type == "kill":
+                kill_action = KillAction.model_validate(action_spec.args)
+                kill_result = await kill_primitive.execute(
+                    kill_action, base_url=base_url, client=client
+                )
+                output = kill_result
+                kill_errors = kill_result.get("errors", [])
+                if kill_errors and kill_action.expect_found:
+                    passed = False
+                    failure_reason = "; ".join(kill_errors)
+                else:
+                    passed = True
+                    failure_reason = None
+            elif action_spec.type == "assert":
+                assert_action = AssertAction.model_validate(action_spec.args)
+                assert_result = await assert_primitive.execute(
+                    assert_action, base_url=base_url, client=client
+                )
+                output = assert_result
+                passed = assert_result.get("passed", False)
+                failure_reason = (
+                    None if passed
+                    else assert_result.get("message", "assertion failed")
+                )
+            elif action_spec.type == "wrk_load":
+                wrk_action = WrkLoadAction.model_validate(action_spec.args)
+                wrk_result = await wrk_load_primitive.execute(
+                    wrk_action, base_url=base_url, client=client
+                )
+                output = wrk_result
+                error_rate = wrk_result.get("error_rate", 0.0)
+                passed = error_rate == 0.0
+                failure_reason = (
+                    None if passed
+                    else f"wrk_load error rate: {error_rate:.4f}"
+                )
+            elif action_spec.type == "parallel":
+                par_action = ParallelAction.model_validate(action_spec.args)
+
+                async def _dispatch(action_dict: dict) -> dict:
+                    normalised = _normalise_action(
+                        action_dict,
+                        path=Path("<parallel-inline>"),
+                        step_index=index,
+                        action_index=0,
+                    )
+                    sub_spec = ActionSpec.model_validate(normalised)
+                    sub_step, _, _, _ = await _execute_step(
+                        index=index,
+                        step_spec=StepSpec(name=f"parallel-sub-{sub_spec.type}", actions=[sub_spec]),
+                        base_url=base_url,
+                        client=client,
+                        request_primitive=request_primitive,
+                        snapshot_primitive=snapshot_primitive,
+                        wait_primitive=wait_primitive,
+                        wait_for_primitive=wait_for_primitive,
+                        kill_primitive=kill_primitive,
+                        assert_primitive=assert_primitive,
+                        wrk_load_primitive=wrk_load_primitive,
+                        parallel_primitive=parallel_primitive,
+                    )
+                    return {"passed": sub_step.passed, "actions": [a.model_dump(mode="json") for a in sub_step.actions]}
+
+                par_result = await parallel_primitive.execute(
+                    par_action, base_url=base_url, client=client, dispatch=_dispatch
+                )
+                output = par_result
+                par_errors = par_result.get("errors", [])
+                passed = len(par_errors) == 0
+                failure_reason = (
+                    None if passed
+                    else f"parallel sub-action errors: {'; '.join(par_errors)}"
+                )
             else:
-                # _SUPPORTED_ACTION_TYPES is enforced by the ActionSpec
-                # validator, so this branch is defensive — an unknown
-                # type here would mean a caller bypassed parsing.
                 raise ScenarioError(
                     f"unsupported action type {action_spec.type!r} reached runner"
                 )
@@ -1230,17 +1349,24 @@ def _build_host_info(*, concerto_version: str, captured_at: datetime) -> HostInf
 # ---------------------------------------------------------------------------
 
 
-def _resolve_concerto_config(options: RunnerOptions, artifact_root: Path) -> Path:
+def _resolve_concerto_config(
+    options: RunnerOptions, artifact_root: Path, scenario: Scenario
+) -> Path:
     """Return a usable path for concerto's ``--config`` flag.
 
     Order of preference:
 
     1. ``options.concerto_config_override`` if set — copied into the
        artifact tree for provenance, then returned.
-    2. ``<repo>/concerto.example.toml`` discovered by walking up from
+    2. If the scenario has a ``models`` section, generate a config TOML
+       from the scenario's models and the example config's ``[server]``
+       / ``[routing]`` sections. This is the key enabler for dry-runs:
+       the scenario author declares models in one place and the runner
+       generates the config concerto needs.
+    3. ``<repo>/concerto.example.toml`` discovered by walking up from
        ``options.concerto_bin`` — copied into the artifact tree,
        returned.
-    3. :class:`RunnerError` — the caller must either build their own
+    4. :class:`RunnerError` — the caller must either build their own
        config file and point at it via ``concerto_config_override`` or
        run from a location where the example config is discoverable.
 
@@ -1265,6 +1391,14 @@ def _resolve_concerto_config(options: RunnerOptions, artifact_root: Path) -> Pat
             ) from exc
         return target
 
+    # When the scenario declares models, generate a config that
+    # includes those models so concerto recognises them. This is
+    # critical for dry-runs where the example config might not list
+    # all models the scenario exercises.
+    if scenario.models:
+        _generate_config_from_scenario(options, scenario, target)
+        return target
+
     example = _find_concerto_example(options.concerto_bin)
     if example is None:
         raise RunnerError(
@@ -1279,6 +1413,75 @@ def _resolve_concerto_config(options: RunnerOptions, artifact_root: Path) -> Pat
             f"failed to copy concerto example config {example} -> {target}: {exc}"
         ) from exc
     return target
+
+
+def _generate_config_from_scenario(
+    options: RunnerOptions, scenario: Scenario, target: Path
+) -> None:
+    """Generate a ``concerto.toml`` from the scenario's model declarations.
+
+    Reads the ``[server]`` and ``[routing]`` sections from the example
+    config (if available) and appends ``[[models]]`` sections from the
+    scenario's ``models`` list. Falls back to sensible defaults if no
+    example config is found.
+    """
+    # Start with example config sections for [server] and [routing]
+    lines: list[str] = []
+
+    example = _find_concerto_example(options.concerto_bin)
+    if example is not None:
+        example_text = example.read_text(encoding="utf-8")
+        # Extract [server] and [routing] sections from example
+        in_models = False
+        for line in example_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[[models]]") or stripped.startswith("[[gpus]]"):
+                in_models = True
+                continue
+            if in_models and stripped.startswith("[") and not stripped.startswith("[["):
+                in_models = False
+            if not in_models and not stripped.startswith("[["):
+                lines.append(line)
+    else:
+        lines.extend([
+            "[server]",
+            'host = "0.0.0.0"',
+            "port = 8000",
+            "",
+            "[routing]",
+            'eviction_policy = "lru"',
+            "cold_start_timeout_secs = 120",
+            "health_check_interval_secs = 10",
+        ])
+
+    lines.append("")
+
+    # Emit [[models]] from scenario
+    for model in scenario.models:
+        lines.append("[[models]]")
+        for key, value in model.items():
+            if isinstance(value, str):
+                lines.append(f'{key} = "{value}"')
+            elif isinstance(value, list):
+                formatted_items = ", ".join(
+                    f'"{item}"' if isinstance(item, str) else str(item)
+                    for item in value
+                )
+                lines.append(f"{key} = [{formatted_items}]")
+            elif isinstance(value, bool):
+                lines.append(f"{key} = {'true' if value else 'false'}")
+            else:
+                lines.append(f"{key} = {value}")
+        lines.append("")
+
+    # Emit [[gpus]] for mock mode
+    if options.mock_gpus:
+        for i in range(options.mock_gpus):
+            lines.append("[[gpus]]")
+            lines.append(f"id = {i}")
+            lines.append("")
+
+    target.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _find_concerto_example(binary: Path) -> Optional[Path]:

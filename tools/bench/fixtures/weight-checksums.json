@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "description": "SHA-256 checksums for Sprint 2 model weight files. Update these after the first successful download by running: python -m concerto_bench verify-weights --models-dir /path/to/models --update",
+  "models": {
+    "qwen2.5-0.5b": {
+      "model.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "config.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "tokenizer.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG"
+    },
+    "phi-3-mini": {
+      "model-00001-of-00002.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "model-00002-of-00002.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "config.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "tokenizer.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG"
+    },
+    "qwen2.5-7b": {
+      "model-00001-of-00004.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "model-00002-of-00004.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "model-00003-of-00004.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "model-00004-of-00004.safetensors": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "config.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG",
+      "tokenizer.json": "PLACEHOLDER_RUN_VERIFY_WEIGHTS_WITH_UPDATE_FLAG"
+    }
+  }
+}
