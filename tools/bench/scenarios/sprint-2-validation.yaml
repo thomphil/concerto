@@ -46,21 +46,21 @@ models:
     weight_path: "/models/qwen2.5-0.5b"
     vram_required: "2GB"
     engine: vllm
-    engine_args: ["--dtype", "float16"]
+    engine_args: ["--dtype", "float16", "--gpu-memory-utilization", "0.20"]
 
   - id: phi-3-mini
     name: "Phi-3 Mini 3.8B"
     weight_path: "/models/phi-3-mini"
     vram_required: "10GB"
     engine: vllm
-    engine_args: ["--dtype", "float16", "--trust-remote-code"]
+    engine_args: ["--dtype", "float16", "--trust-remote-code", "--gpu-memory-utilization", "0.70"]
 
   - id: qwen2.5-7b
     name: "Qwen 2.5 7B"
     weight_path: "/models/qwen2.5-7b"
     vram_required: "14GB"
     engine: vllm
-    engine_args: ["--dtype", "float16", "--max-model-len", "4096"]
+    engine_args: ["--dtype", "float16", "--max-model-len", "4096", "--gpu-memory-utilization", "0.90"]
 
 # --------------------------------------------------------------------------
 # Samplers (all 5, at 1 Hz)
