@@ -96,6 +96,16 @@ def run_cmd(
         "--concerto-config",
         help="Override path to concerto.toml config file.",
     ),
+    http_timeout: float = typer.Option(
+        240.0,
+        "--http-timeout",
+        help="HTTP request timeout in seconds. Must exceed cold-start time (default 240s).",
+    ),
+    startup_timeout: float = typer.Option(
+        60.0,
+        "--startup-timeout",
+        help="Concerto /health gate timeout in seconds.",
+    ),
     log_level: str = typer.Option(
         "info",
         "--log-level",
@@ -120,6 +130,8 @@ def run_cmd(
         concerto_config_override=config_override.resolve() if config_override else None,
         concerto_log_level=log_level if log_level in ("debug", "info", "warn", "error") else "info",
         concerto_log_format="json",
+        http_timeout_secs=http_timeout,
+        startup_timeout_secs=startup_timeout,
     )
 
     result = asyncio.run(run_scenario(options))

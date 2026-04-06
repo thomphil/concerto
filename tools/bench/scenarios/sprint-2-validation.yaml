@@ -58,7 +58,7 @@ models:
   - id: qwen2.5-7b
     name: "Qwen 2.5 7B"
     weight_path: "/models/qwen2.5-7b"
-    vram_required: "17GB"
+    vram_required: "14GB"
     engine: vllm
     engine_args: ["--dtype", "float16", "--max-model-len", "4096"]
 
@@ -218,7 +218,7 @@ steps:
           content: "Confirm you are loaded before crash test."
           capture_as: pre-crash-phi3
       - kill:
-          pattern: "vllm.*phi-3"
+          pattern: "python.*vllm.*phi-3"
           signal: 9
       - wait:
           duration_secs: 2
