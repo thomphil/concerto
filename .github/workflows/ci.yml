@@ -46,3 +46,31 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+  bench-rig-tests:
+    name: Bench Rig Tests
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build concerto binary
+        run: cargo build
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bench rig
+        run: pip install -e tools/bench[dev]
+
+      - name: Run bench rig tests
+        run: pytest tools/bench/tests/ -v

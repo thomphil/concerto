@@ -1,0 +1,283 @@
+# ==========================================================================
+# Sprint 2 Validation Scenario
+# ==========================================================================
+#
+# Canonical 8-step validation flow for Sprint 2. Exercises the full
+# orchestrator lifecycle: cold start, multi-model routing, LRU eviction,
+# VRAM drift checking, sustained concurrent load, crash recovery, orphan
+# detection, and graceful shutdown.
+#
+# Hardware target: 2x RTX A4000 (16 GB each).
+# Expected wall time: ~15 minutes on real hardware; ~6 minutes with
+# mock-inference-backend (5 minutes of that is the concurrent-load step).
+#
+# See SPRINT-2-PLAN.md section 5 for the source-of-truth step table and
+# exit criteria this file implements.
+# ==========================================================================
+
+name: sprint-2-validation
+version: "1"
+description: >
+  Full Sprint 2 validation: cold start, multi-model routing, eviction,
+  VRAM drift check, concurrent load, crash recovery, orphan detection,
+  and graceful shutdown. Designed for 2x RTX A4000 (16 GB each).
+
+# --------------------------------------------------------------------------
+# Parameters (SPRINT-2-PLAN section 5)
+# --------------------------------------------------------------------------
+
+parameters:
+  concurrent_clients: 20
+  concurrent_duration_secs: 300
+  cold_start_timeout_secs: 240
+  eviction_grace_period_secs: 30
+  sample_interval_secs: 1
+
+# --------------------------------------------------------------------------
+# Models (3 models from SPRINT-2-PLAN section 5)
+#
+# Sized so that qwen2.5-0.5b + phi-3-mini fit on 2 GPUs simultaneously,
+# but qwen2.5-7b forces an LRU eviction to free enough VRAM.
+# --------------------------------------------------------------------------
+
+models:
+  - id: qwen2.5-0.5b
+    name: "Qwen 2.5 0.5B"
+    weight_path: "/models/qwen2.5-0.5b"
+    vram_required: "2GB"
+    engine: vllm
+    engine_args: ["--dtype", "float16"]
+
+  - id: phi-3-mini
+    name: "Phi-3 Mini 3.8B"
+    weight_path: "/models/phi-3-mini"
+    vram_required: "10GB"
+    engine: vllm
+    engine_args: ["--dtype", "float16", "--trust-remote-code"]
+
+  - id: qwen2.5-7b
+    name: "Qwen 2.5 7B"
+    weight_path: "/models/qwen2.5-7b"
+    vram_required: "17GB"
+    engine: vllm
+    engine_args: ["--dtype", "float16", "--max-model-len", "4096"]
+
+# --------------------------------------------------------------------------
+# Samplers (all 5, at 1 Hz)
+# --------------------------------------------------------------------------
+
+samplers:
+  - name: nvidia-smi
+    interval_secs: 1.0
+
+  - name: concerto-status
+    interval_secs: 1.0
+
+  - name: concerto-metrics
+    interval_secs: 1.0
+
+  - name: pgrep-count
+    interval_secs: 1.0
+    config:
+      patterns: ["vllm", "python -m vllm", "mock-inference-backend"]
+
+  - name: proc-stats
+    interval_secs: 1.0
+
+# --------------------------------------------------------------------------
+# Steps (8 steps from SPRINT-2-PLAN section 5)
+# --------------------------------------------------------------------------
+
+steps:
+  # ========================================================================
+  # Step 01 — Single-model smoke
+  #
+  # Cold-start each model by sending a request (which triggers the
+  # orchestrator to load it), then confirm it's loaded. Request-first
+  # ordering works against both mock-inference-backend and real vLLM.
+  # ========================================================================
+  - name: single-model-smoke
+    description: >
+      Cold-start each of the 3 models one at a time and verify a
+      successful chat completion response from each.
+    actions:
+      # -- qwen2.5-0.5b: request triggers load, wait confirms --
+      - request:
+          model: qwen2.5-0.5b
+          content: "Say hello in one sentence."
+          capture_as: smoke-qwen2.5-0.5b
+      - wait_for:
+          condition: model_loaded
+          model: qwen2.5-0.5b
+          timeout_secs: 240
+
+      # -- phi-3-mini --
+      - request:
+          model: phi-3-mini
+          content: "Say hello in one sentence."
+          capture_as: smoke-phi-3-mini
+      - wait_for:
+          condition: model_loaded
+          model: phi-3-mini
+          timeout_secs: 240
+
+      # -- qwen2.5-7b --
+      - request:
+          model: qwen2.5-7b
+          content: "Say hello in one sentence."
+          capture_as: smoke-qwen2.5-7b
+      - wait_for:
+          condition: model_loaded
+          model: qwen2.5-7b
+          timeout_secs: 240
+
+  # ========================================================================
+  # Step 02 — Multi-model cold start
+  # ========================================================================
+  - name: multi-model-cold-start
+    description: >
+      Load phi-3 while qwen2.5-0.5b is already loaded; verify both
+      coexist on separate GPUs.
+    actions:
+      - request:
+          model: qwen2.5-0.5b
+          content: "Confirm you are loaded."
+          capture_as: coexist-small
+      - request:
+          model: phi-3-mini
+          content: "Confirm you are loaded."
+          capture_as: coexist-medium
+      - assert:
+          assert_type: backend_count
+          expected: 2
+      - snapshot: {}
+
+  # ========================================================================
+  # Step 03 — Eviction
+  # ========================================================================
+  - name: eviction
+    description: >
+      Load qwen2.5-7b with both smaller models resident; verify LRU
+      eviction frees enough VRAM for the larger model.
+    actions:
+      - request:
+          model: qwen2.5-7b
+          content: "Summarize LRU eviction in one sentence."
+          capture_as: eviction-trigger
+      - wait_for:
+          condition: model_loaded
+          model: qwen2.5-7b
+          timeout_secs: 240
+      - assert:
+          assert_type: backend_count
+          expected: 2
+      - snapshot: {}
+
+  # ========================================================================
+  # Step 04 — Eviction VRAM drift check
+  # ========================================================================
+  - name: eviction-vram-drift-check
+    description: >
+      Compare nvidia-smi VRAM with concerto /status memory accounting.
+      Drift must be less than 10%.
+    actions:
+      - snapshot:
+          capture_label: vram-drift
+      # VRAM drift assertion requires telemetry analysis after the run.
+      # The snapshot captures ground truth; the analyzer computes drift.
+      # For now, just verify /status is reachable.
+      - assert:
+          assert_type: status_code
+
+  # ========================================================================
+  # Step 05 — Concurrent load (5 minutes)
+  # ========================================================================
+  - name: concurrent-load-5min
+    description: >
+      20 concurrent clients hammering the loaded model for 5 minutes.
+      Validates throughput, error rate, and tail latency under sustained
+      load.
+    actions:
+      - wrk_load:
+          concurrency: 20
+          duration_secs: 300
+          model: qwen2.5-7b
+          content: "Explain quantum computing briefly."
+
+  # ========================================================================
+  # Step 06 — Backend crash and recovery
+  # ========================================================================
+  - name: backend-crash
+    description: >
+      Kill the phi-3 worker mid-run with SIGKILL; verify concerto
+      returns a clean 503 to in-flight requests, then recovers the
+      model through its health-check loop.
+    actions:
+      - request:
+          model: phi-3-mini
+          content: "Confirm you are loaded before crash test."
+          capture_as: pre-crash-phi3
+      - kill:
+          pattern: "vllm.*phi-3"
+          signal: 9
+      - wait:
+          duration_secs: 2
+      - request:
+          model: phi-3-mini
+          content: "Are you back after crash?"
+          capture_as: post-crash-phi3
+      - wait_for:
+          condition: model_loaded
+          model: phi-3-mini
+          timeout_secs: 120
+
+  # ========================================================================
+  # Step 07 — Orphan check post-crash
+  # ========================================================================
+  - name: orphan-check-post-crash
+    description: >
+      After crash recovery, verify no orphan vLLM workers remain.
+      Every running backend process should be owned by concerto.
+    actions:
+      - snapshot:
+          capture_label: post-crash
+      - assert:
+          assert_type: status_code
+
+  # ========================================================================
+  # Step 08 — Graceful shutdown
+  # ========================================================================
+  - name: graceful-shutdown
+    description: >
+      Verify clean shutdown under active load. Send a short burst of
+      concurrent requests, then let the runner's process lifecycle send
+      SIGTERM. Measure shutdown wall time and confirm zero orphans.
+    actions:
+      - request:
+          model: phi-3-mini
+          content: "Final request before shutdown."
+          capture_as: pre-shutdown-check
+      - wrk_load:
+          concurrency: 5
+          duration_secs: 30
+          model: phi-3-mini
+          content: "Sustained load during shutdown window."
+      - snapshot:
+          capture_label: pre-shutdown
+
+# --------------------------------------------------------------------------
+# Exit criteria (SPRINT-2-PLAN section 5)
+#
+# The analyzer evaluates these against the summary after the run
+# completes. All must pass for the scenario verdict to be "success".
+# --------------------------------------------------------------------------
+
+exit_criteria:
+  launched_count_gte: 4
+  stopped_count_gte: 2
+  http_error_rate_max: 0.0
+  vram_drift_max_percent: 10.0
+  graceful_shutdown_wall_time_max_secs: 60
+  orphan_processes_after_shutdown_max: 0
+
+continue_on_failure: true

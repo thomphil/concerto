@@ -1,0 +1,102 @@
+# ==========================================================================
+# Smoke Quick — 30-second sanity check
+# ==========================================================================
+#
+# Stripped-down scenario for fast iteration. Loads one small model, sends
+# two requests, and captures a state snapshot. Finishes in ~30 seconds
+# with mock-inference-backend, ~60 seconds with real vLLM on a small model.
+#
+# Use this to verify the bench rig plumbing before running the full
+# sprint-2-validation scenario.
+# ==========================================================================
+
+name: smoke-quick
+version: "1"
+description: >
+  Quick smoke test for fast iteration. Loads one model, sends one request,
+  captures a snapshot. ~30 seconds on mock-inference-backend, ~60 seconds
+  on real vLLM with a small model.
+
+# --------------------------------------------------------------------------
+# Parameters
+# --------------------------------------------------------------------------
+
+parameters:
+  cold_start_timeout_secs: 60
+
+# --------------------------------------------------------------------------
+# Models (single small model)
+# --------------------------------------------------------------------------
+
+models:
+  - id: qwen2.5-0.5b
+    name: "Qwen 2.5 0.5B"
+    weight_path: "/models/qwen2.5-0.5b"
+    vram_required: "2GB"
+    engine: vllm
+    engine_args: ["--dtype", "float16"]
+
+# --------------------------------------------------------------------------
+# Samplers (minimal set)
+# --------------------------------------------------------------------------
+
+samplers:
+  - name: concerto-status
+    interval_secs: 1.0
+
+  - name: pgrep-count
+    interval_secs: 1.0
+    config:
+      patterns: ["vllm", "python -m vllm", "mock-inference-backend"]
+
+# --------------------------------------------------------------------------
+# Steps (3 quick steps)
+# --------------------------------------------------------------------------
+
+steps:
+  # ========================================================================
+  # Step 01 — Load and request
+  # ========================================================================
+  - name: load-and-request
+    description: >
+      Load qwen2.5-0.5b via a chat completion request and verify a
+      successful response.
+    actions:
+      - request:
+          model: qwen2.5-0.5b
+          content: "hello"
+          capture_as: smoke
+
+  # ========================================================================
+  # Step 02 — Verify state
+  # ========================================================================
+  - name: verify-state
+    description: >
+      Capture a state snapshot and assert at least one backend is running.
+    actions:
+      - snapshot: {}
+      - assert:
+          assert_type: backend_count
+          expected: 1
+
+  # ========================================================================
+  # Step 03 — Second request
+  # ========================================================================
+  - name: second-request
+    description: >
+      Send a follow-up request to confirm the model stays loaded and
+      responsive across steps.
+    actions:
+      - request:
+          model: qwen2.5-0.5b
+          content: "goodbye"
+          capture_as: farewell
+
+# --------------------------------------------------------------------------
+# Exit criteria (minimal)
+# --------------------------------------------------------------------------
+
+exit_criteria:
+  launched_count_gte: 1
+
+continue_on_failure: true

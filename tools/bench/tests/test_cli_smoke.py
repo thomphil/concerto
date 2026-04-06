@@ -1,10 +1,9 @@
-"""Smoke tests for the Phase B.1 CLI skeleton.
+"""Smoke tests for the CLI surface.
 
-These tests verify only the scaffolding: that the package imports,
-the typer app loads, ``--help`` lists every declared subcommand, and
-each stub exits with the documented ``not implemented`` exit code when
-invoked. Real behavioural tests land alongside the implementations in
-later Phase B sub-steps.
+These tests verify that the typer app loads, ``--help`` lists every
+declared subcommand, version flag works, and subcommands with missing
+required args produce usage errors. Real behavioural tests for each
+subcommand land alongside their implementations.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import pytest
 from typer.testing import CliRunner
 
 from concerto_bench import __version__
-from concerto_bench.cli import _EXIT_NOT_IMPLEMENTED, app
+from concerto_bench.cli import app
 
 runner = CliRunner()
 
@@ -45,37 +44,29 @@ def test_version_flag_prints_package_version() -> None:
     assert __version__ in result.output
 
 
-@pytest.mark.parametrize(
-    ("subcommand", "extra_args"),
-    [
-        (
-            "run",
-            [
-                "--scenario",
-                "scenario.yaml",
-                "--concerto-bin",
-                "/tmp/concerto",
-                "--output",
-                "/tmp/out",
-            ],
-        ),
-        (
-            "dry-run",
-            ["--scenario", "scenario.yaml", "--output", "/tmp/out"],
-        ),
-        ("summarize", ["/tmp/run.tar.gz"]),
-        ("verify-weights", ["--models-dir", "/tmp/models"]),
-        ("estimate", ["--scenario", "scenario.yaml"]),
-    ],
-)
-def test_stub_commands_exit_with_not_implemented_code(
-    subcommand: str, extra_args: list[str]
-) -> None:
-    result = runner.invoke(app, [subcommand, *extra_args])
-    assert result.exit_code == _EXIT_NOT_IMPLEMENTED, result.output
-    # The error message is written to stderr; CliRunner captures both in
-    # result.output unless mix_stderr=False is passed, which it is not.
-    assert "not implemented" in result.output.lower()
+@pytest.mark.parametrize("subcommand", EXPECTED_SUBCOMMANDS)
+def test_subcommand_help_exits_cleanly(subcommand: str) -> None:
+    """Each subcommand's --help should work."""
+    result = runner.invoke(app, [subcommand, "--help"])
+    assert result.exit_code == 0, result.output
+
+
+def test_run_requires_scenario_and_bin() -> None:
+    """run without required options exits with error."""
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code != 0
+
+
+def test_dry_run_requires_scenario() -> None:
+    """dry-run without --scenario exits with error."""
+    result = runner.invoke(app, ["dry-run"])
+    assert result.exit_code != 0
+
+
+def test_estimate_requires_scenario() -> None:
+    """estimate without --scenario exits with error."""
+    result = runner.invoke(app, ["estimate"])
+    assert result.exit_code != 0
 
 
 def test_rig_config_model_importable() -> None:
