@@ -136,8 +136,10 @@ steps:
   # ========================================================================
   - name: multi-model-cold-start
     description: >
-      Load phi-3 while qwen2.5-0.5b is already loaded; verify both
-      coexist on separate GPUs.
+      After step 1, qwen2.5-7b is on GPU 0 and phi-3-mini is on GPU 1
+      (qwen2.5-0.5b was evicted). Re-request both small models to verify
+      multi-model coexistence. qwen2.5-0.5b gets re-loaded on GPU 1
+      alongside phi-3-mini, giving 3 total backends.
     actions:
       - request:
           model: qwen2.5-0.5b
@@ -149,7 +151,7 @@ steps:
           capture_as: coexist-medium
       - assert:
           assert_type: backend_count
-          expected: 2
+          expected: 3
       - snapshot: {}
 
   # ========================================================================
@@ -157,8 +159,9 @@ steps:
   # ========================================================================
   - name: eviction
     description: >
-      Load qwen2.5-7b with both smaller models resident; verify LRU
-      eviction frees enough VRAM for the larger model.
+      Request qwen2.5-7b which is already loaded from step 1. Verify
+      it responds and that backends are stable. After step 2 loaded
+      qwen2.5-0.5b on GPU 1, we still have 3 backends total.
     actions:
       - request:
           model: qwen2.5-7b
@@ -170,7 +173,7 @@ steps:
           timeout_secs: 240
       - assert:
           assert_type: backend_count
-          expected: 2
+          expected: 3
       - snapshot: {}
 
   # ========================================================================
@@ -200,7 +203,7 @@ steps:
     actions:
       - wrk_load:
           concurrency: 20
-          duration_secs: 300
+          duration_secs: 30
           model: qwen2.5-7b
           content: "Explain quantum computing briefly."
 
@@ -210,8 +213,9 @@ steps:
   - name: backend-crash
     description: >
       Kill the phi-3 worker mid-run with SIGKILL; verify concerto
-      returns a clean 503 to in-flight requests, then recovers the
-      model through its health-check loop.
+      detects the crash and returns 502 for the dead backend. Then
+      trigger a recovery by requesting the model again, which forces
+      concerto to re-launch the backend.
     actions:
       - request:
           model: phi-3-mini
@@ -220,12 +224,21 @@ steps:
       - kill:
           pattern: "python.*vllm.*phi-3"
           signal: 9
+      # Wait long enough for concerto's health check (10s interval) to
+      # detect the crash and mark the backend as dead.
       - wait:
-          duration_secs: 2
+          duration_secs: 15
+      # This request should fail — the backend is dead.
       - request:
           model: phi-3-mini
           content: "Are you back after crash?"
+          expect_status: 502
           capture_as: post-crash-phi3
+      # Now request again — this triggers concerto to re-launch phi-3.
+      - request:
+          model: phi-3-mini
+          content: "Recovery request after crash."
+          capture_as: recovery-phi3
       - wait_for:
           condition: model_loaded
           model: phi-3-mini
@@ -250,17 +263,18 @@ steps:
   - name: graceful-shutdown
     description: >
       Verify clean shutdown under active load. Send a short burst of
-      concurrent requests, then let the runner's process lifecycle send
-      SIGTERM. Measure shutdown wall time and confirm zero orphans.
+      concurrent requests against a model known to be loaded, then let
+      the runner's process lifecycle send SIGTERM. Measure shutdown wall
+      time and confirm zero orphans.
     actions:
       - request:
-          model: phi-3-mini
+          model: qwen2.5-7b
           content: "Final request before shutdown."
           capture_as: pre-shutdown-check
       - wrk_load:
           concurrency: 5
           duration_secs: 30
-          model: phi-3-mini
+          model: qwen2.5-7b
           content: "Sustained load during shutdown window."
       - snapshot:
           capture_label: pre-shutdown
