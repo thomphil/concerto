@@ -26,6 +26,12 @@ SPRINT-2-PLAN.md
 
 # Local bench rig artifacts (tarballs are too big to commit; summaries go in docs/)
 /bench-artifacts/
+docs/benchmarks/*.tar.gz
+docs/benchmarks/*.sha256
+
+# Vast.ai instance cache (written by tools/bench/remote.sh)
+.vast-instance
+
 
 # Python build / test caches (concerto-bench rig under tools/bench/)
 __pycache__/

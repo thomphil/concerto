@@ -1,112 +1,111 @@
 # Concerto Benchmark: sprint-2-validation v1
 
-> **Run 1 (2026-04-06):** First real-hardware run on 2x RTX A4000.
-> Surfaced a config generation bug: model weight paths in the generated
-> `concerto.toml` pointed at `/models/*` (from the scenario YAML) instead
-> of `/root/models/*` (the actual download location on the Vast.ai box).
-> All 502/503 errors below stem from this single root cause — vLLM
-> backends couldn't find their weight files and failed to start. The
-> rig itself operated correctly: 8 steps ran, 1,413 telemetry samples
-> captured per sampler, all artifacts preserved. Fix: either template
-> weight paths from `--models-dir` into the generated config, or pass
-> a hand-crafted `--concerto-config` for real-hardware runs.
+## Run 12 — Full Production (2026-04-07)
 
-**Run date:** 2026-04-06T18:02:43.882345+00:00  
-**Duration:** 1413.8s (~23.6 min)  
-**Hardware:** 2x NVIDIA RTX A4000 (16 GB each), Poland  
-**Cost:** ~$0.08 (£0.06) at $0.16/hr  
-**Concerto version:** concerto 0.1.0 (cc4c693)  
+> **First fully passing real-hardware run.** All 8 steps of the Sprint 2
+> validation scenario passed end-to-end on 2x RTX A4000 with real vLLM
+> backends. Exercises: cold start, multi-model routing, LRU eviction,
+> VRAM drift checking, 5-minute sustained concurrent load (20 clients),
+> crash recovery via SIGKILL + automatic re-launch, orphan detection,
+> and graceful shutdown.
+
+**Run date:** 2026-04-07T06:11:04Z  
+**Duration:** 538.9s (~9.0 min)  
+**Hardware:** 2x NVIDIA RTX A4000 (16 GB each), Vast.ai (Poland)  
+**Concerto version:** concerto 0.1.0  
 **Rig version:** 0.1.0.dev0  
-**Exit status:** partial_failure (config bug — see note above)  
+**Inference engine:** vLLM 0.19.0  
+**Exit status:** success (8/8 steps passed)  
 
-## Summary
-
-| Metric | Value |
-|--------|-------|
-| Steps passed | 2/8 |
-| Steps failed | 6 |
-| Failed steps | single-model-smoke, multi-model-cold-start, eviction, concurrent-load-5min, backend-crash, graceful-shutdown |
-
-## Step Results
+### Step Results
 
 | # | Step | Status | Duration |
 |---|------|--------|----------|
-| 1 | single-model-smoke | ❌ FAIL | 720.2s |
-| 2 | multi-model-cold-start | ❌ FAIL | 110.4ms |
-| 3 | eviction | ❌ FAIL | 240.1s |
-| 4 | eviction-vram-drift-check | ✅ PASS | 133.8ms |
-| 5 | concurrent-load-5min | ❌ FAIL | 300.1s |
-| 6 | backend-crash | ❌ FAIL | 122.1s |
-| 7 | orphan-check-post-crash | ✅ PASS | 115.7ms |
-| 8 | graceful-shutdown | ❌ FAIL | 30.1s |
+| 1 | single-model-smoke | PASS | 89.5s |
+| 2 | multi-model-cold-start | PASS | 28.3s |
+| 3 | eviction | PASS | 1.4s |
+| 4 | eviction-vram-drift-check | PASS | 0.1s |
+| 5 | concurrent-load-5min | PASS | 317.0s |
+| 6 | backend-crash | PASS | 52.5s |
+| 7 | orphan-check-post-crash | PASS | 0.1s |
+| 8 | graceful-shutdown | PASS | 47.4s |
 
-### Step 1 — single-model-smoke (FAIL)
-- **Failures:**
-  - request: unexpected status 502 (expected 200)
-  - wait_for: wait_for condition not satisfied after 240.0009111580439s
-  - request: unexpected status 502 (expected 200)
-  - wait_for: wait_for condition not satisfied after 240.00062995310873s
-  - request: unexpected status 503 (expected 200)
-  - wait_for: wait_for condition not satisfied after 240.00146429007873s
+### Models
 
-### Step 2 — multi-model-cold-start (FAIL)
-- **Failures:**
-  - request: unexpected status 502 (expected 200)
-  - request: unexpected status 502 (expected 200)
-  - assert: expected 2 backends, got 0
+| Model | VRAM | GPU Util | Engine Args |
+|-------|------|----------|-------------|
+| qwen2.5-0.5b (0.5B params) | 1.9 GiB | 0.20 | `--dtype float16` |
+| phi-3-mini (3.8B params) | 9.3 GiB | 0.70 | `--dtype float16 --trust-remote-code` |
+| qwen2.5-7b (7B params) | 13.0 GiB | 0.98 | `--dtype float16 --max-model-len 2048 --enforce-eager` |
 
-### Step 3 — eviction (FAIL)
-- **Failures:**
-  - request: unexpected status 503 (expected 200)
-  - wait_for: wait_for condition not satisfied after 240.00116249592975s
-  - assert: expected 2 backends, got 0
+### Cold Start Latencies
 
-### Step 5 — concurrent-load-5min (FAIL)
-- **Failures:**
-  - wrk_load: wrk_load error rate: 1.0000
+| Model | Cold Start (s) | Notes |
+|-------|---------------|-------|
+| qwen2.5-0.5b | 27.4 | First model loaded (GPU 0) |
+| phi-3-mini | 33.3 | Second model (GPU 1) |
+| qwen2.5-7b | 27.6 | Third model, triggers eviction of 0.5B from GPU 0 |
+| phi-3-mini (re-launch after crash) | 33.8 | SIGKILL → auto-recovery |
 
-### Step 6 — backend-crash (FAIL)
-- **Failures:**
-  - request: unexpected status 502 (expected 200)
-  - kill: no process matched pattern 'vllm.*phi-3'
-  - request: unexpected status 502 (expected 200)
-  - wait_for: wait_for condition not satisfied after 120.00082576787099s
+### Concurrent Load (Step 5)
 
-### Step 8 — graceful-shutdown (FAIL)
-- **Failures:**
-  - request: unexpected status 502 (expected 200)
-  - wrk_load: wrk_load error rate: 1.0000
+20 concurrent clients against qwen2.5-7b for 5 minutes.
 
-## Request Latencies
+| Metric | Value |
+|--------|-------|
+| Total requests | 379 |
+| Successful | 379 |
+| Failed | 0 |
+| Error rate | 0.0% |
+| Throughput | 1.20 rps |
+| Latency p50 | 16,438 ms |
+| Latency p95 | 19,801 ms |
+| Latency p99 | 21,710 ms |
+| Latency max | 23,238 ms |
+| Latency min | 7,451 ms |
+| Latency mean | 16,245 ms |
+
+> Latency is dominated by vLLM inference time on a single A4000 with 20
+> concurrent clients queued against one 7B model. The 0% error rate
+> confirms stability under sustained saturation.
+
+### Crash Recovery (Step 6)
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| Pre-crash request (phi-3-mini) | 2.6s | 200 OK |
+| Kill phi-3 worker (SIGKILL + children) | 1.0s | PID 38470 killed |
+| Wait for health-check detection | 15.0s | — |
+| Post-crash request (triggers re-launch) | 33.8s | 200 OK |
+| Confirm model loaded | <1ms | Satisfied on first poll |
+
+### Request Latencies (warm)
 
 | Request | Status | Total (ms) | TTFB (ms) |
 |---------|--------|-----------|-----------|
-| smoke-phi-3-mini | 502 | 3.6 | 2.5 |
-| smoke-qwen2.5-0.5b | 502 | 3.3 | 2.2 |
-| smoke-qwen2.5-7b | 503 | 1.5 | 0.9 |
-| coexist-medium | 502 | 2.4 | 1.6 |
-| coexist-small | 502 | 2.8 | 1.9 |
-| eviction-trigger | 503 | 2.6 | 1.5 |
-| post-crash-phi3 | 502 | 4.2 | 2.7 |
-| pre-crash-phi3 | 502 | 3.7 | 2.3 |
-| pre-shutdown-check | 502 | 3.1 | 2.1 |
+| smoke-qwen2.5-0.5b | 200 | 27,354 | 27,352 |
+| smoke-phi-3-mini | 200 | 33,336 | 33,335 |
+| smoke-qwen2.5-7b | 200 | 27,644 | 27,643 |
+| coexist-small (re-load) | 200 | 27,306 | 27,305 |
+| coexist-medium (warm) | 200 | 768 | 766 |
+| eviction-trigger (warm) | 200 | 1,166 | 1,165 |
+| pre-crash-phi3 (warm) | 200 | 2,579 | — |
+| post-crash-phi3 (re-launch) | 200 | 33,775 | — |
+| pre-shutdown-check (warm) | 200 | 1,024 | — |
 
-**Aggregate latency (from request records):**
-- p50: 3.1ms
-- p95: 4.0ms
-- p99: 4.1ms
-- max: 4.2ms
-- count: 9
+---
 
-**Error rate:** 9/9 (100.0%)
+## Run 1 — First Hardware Run (2026-04-06)
 
-## Telemetry Summary
+> **Config generation bug.** Weight paths in the generated `concerto.toml`
+> pointed at `/models/*` instead of `/root/models/*`. All 502/503 errors
+> stem from this single root cause — vLLM backends couldn't find weight
+> files. The rig itself operated correctly: 8 steps ran, 1,413 telemetry
+> samples captured, all artifacts preserved.
 
-- concerto-metrics: 1413 samples (2026-04-06T18:02:44.141733Z .. 2026-04-06T18:26:16.143927Z)
-- concerto-status: 1413 samples (2026-04-06T18:02:44.114356Z .. 2026-04-06T18:26:16.115536Z)
-- nvidia-smi: 1413 samples (2026-04-06T18:02:44.087215Z .. 2026-04-06T18:26:16.089534Z)
-- pgrep-count: 1413 samples (2026-04-06T18:02:44.142274Z .. 2026-04-06T18:26:16.144704Z)
-- proc-stats: 1413 samples (2026-04-06T18:02:44.144975Z .. 2026-04-06T18:26:16.146819Z)
+**Run date:** 2026-04-06T18:02:43Z  
+**Duration:** 1413.8s (~23.6 min)  
+**Exit status:** partial_failure — 2/8 steps passed  
 
 ---
 *Generated by concerto-bench 0.1.0.dev0*
