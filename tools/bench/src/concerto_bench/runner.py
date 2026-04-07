@@ -147,8 +147,11 @@ from concerto_bench.samplers import (
 )
 from concerto_bench.schema import (
     ActionRecord,
+    ExitCriteriaResults,
     HostInfo,
+    LatencyHistogram,
     ManifestV1,
+    ModelMetrics,
     RequestRecord,
     StateSnapshot,
     StepResult,
@@ -875,6 +878,7 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
             step_results=step_results,
             failed_step_names=failed_step_names,
             exit_status=exit_status,
+            telemetry_dir=builder.telemetry_dir(),
         )
 
         host_info = _build_host_info(
@@ -1304,20 +1308,30 @@ def _build_summary(
     step_results: list[StepResult],
     failed_step_names: list[str],
     exit_status: str,
+    telemetry_dir: Optional[Path] = None,
 ) -> SummaryV1:
-    """Assemble the v1 :class:`SummaryV1` from the captured step results.
+    """Assemble the v1 :class:`SummaryV1` from captured step results.
 
-    The step 7 runner populates the load-bearing "did the run pass"
-    fields (``scenario_passed``, ``step_count``, ``steps_passed``,
-    ``steps_failed``, ``failed_step_names``) and leaves the metric
-    fields (``routing_decision_latency``, ``concurrent_load_*``,
-    ``model_metrics``, ``exit_criteria``) at their defaults. Step 11
-    (analyze / summarize) will compute those from the telemetry
-    streams; the runner's job is only to make sure the record shape is
-    valid now.
+    Computes all ROADMAP §7 and SPRINT-2-PLAN §5 metrics from the step
+    results and (where available) telemetry JSONL files. Also evaluates
+    exit criteria against the scenario's thresholds.
     """
     steps_passed = sum(1 for step in step_results if step.passed)
     steps_failed = len(step_results) - steps_passed
+
+    # -- Extract metrics from step results --------------------------------
+    metrics = _extract_metrics_from_steps(step_results)
+
+    # -- Read launched/stopped counts from concerto-metrics telemetry ------
+    if telemetry_dir is not None:
+        telemetry_metrics = _read_telemetry_counters(telemetry_dir)
+        metrics.update(telemetry_metrics)
+
+    # -- Evaluate exit criteria -------------------------------------------
+    exit_criteria_results = _evaluate_exit_criteria(
+        scenario.exit_criteria, metrics
+    )
+
     return SummaryV1(
         scenario_name=scenario.name,
         scenario_version=scenario.version,
@@ -1327,6 +1341,306 @@ def _build_summary(
         steps_passed=steps_passed,
         steps_failed=steps_failed,
         failed_step_names=failed_step_names,
+        launched_count=metrics.get("launched_count"),
+        stopped_count=metrics.get("stopped_count"),
+        http_error_rate=metrics.get("http_error_rate"),
+        vram_drift_max_percent=metrics.get("vram_drift_max_percent"),
+        graceful_shutdown_wall_time_secs=metrics.get(
+            "graceful_shutdown_wall_time_secs"
+        ),
+        orphan_processes_after_shutdown=metrics.get(
+            "orphan_processes_after_shutdown"
+        ),
+        concurrent_load_throughput_rps=metrics.get(
+            "concurrent_load_throughput_rps"
+        ),
+        concurrent_load_error_rate=metrics.get("concurrent_load_error_rate"),
+        concurrent_load_latency=metrics.get("concurrent_load_latency"),
+        model_metrics=metrics.get("model_metrics", {}),
+        exit_criteria=exit_criteria_results,
+    )
+
+
+def _extract_metrics_from_steps(
+    step_results: list[StepResult],
+) -> dict[str, Any]:
+    """Walk step results and extract all computable metrics.
+
+    Returns a dict whose keys match :class:`SummaryV1` field names.
+    Values that cannot be determined are omitted (not set to None).
+    """
+    metrics: dict[str, Any] = {}
+
+    # -- Per-model tracking -----------------------------------------------
+    model_first_cold_start: dict[str, float] = {}  # model_id -> ms
+    model_request_counts: dict[str, int] = {}
+    model_error_counts: dict[str, int] = {}
+
+    # -- HTTP error rate (individual request actions, excluding wrk_load) --
+    total_requests = 0
+    error_requests = 0
+
+    for step in step_results:
+        # Graceful shutdown wall time from the shutdown step
+        if "shutdown" in step.step_name:
+            metrics["graceful_shutdown_wall_time_secs"] = (
+                step.duration_ms / 1000.0
+            )
+
+        for action in step.actions:
+            atype = action.action_type
+            output = action.output
+
+            # -- request actions ------------------------------------------
+            if atype == "request":
+                rr = output.get("request_record", {})
+                status = rr.get("status", 0)
+                model_id = rr.get("request_body", {}).get("model")
+                elapsed = rr.get("elapsed_total_ms", 0)
+
+                total_requests += 1
+                if status < 200 or status >= 300:
+                    error_requests += 1
+
+                if model_id:
+                    model_request_counts[model_id] = (
+                        model_request_counts.get(model_id, 0) + 1
+                    )
+                    if status < 200 or status >= 300:
+                        model_error_counts[model_id] = (
+                            model_error_counts.get(model_id, 0) + 1
+                        )
+                    # First successful request per model = cold start
+                    if (
+                        model_id not in model_first_cold_start
+                        and 200 <= status < 300
+                    ):
+                        model_first_cold_start[model_id] = elapsed
+
+            # -- wrk_load actions -----------------------------------------
+            elif atype == "wrk_load":
+                rps = output.get("rps")
+                if rps is not None:
+                    metrics["concurrent_load_throughput_rps"] = rps
+                err_rate = output.get("error_rate")
+                if err_rate is not None:
+                    metrics["concurrent_load_error_rate"] = err_rate
+                latency = output.get("latency_ms", {})
+                total_reqs = output.get("total_requests", 0)
+                if latency and total_reqs > 0:
+                    metrics["concurrent_load_latency"] = LatencyHistogram(
+                        p50_ms=latency.get("p50", 0),
+                        p95_ms=latency.get("p95", 0),
+                        p99_ms=latency.get("p99", 0),
+                        max_ms=latency.get("max", 0),
+                        count=total_reqs,
+                    )
+
+            # -- snapshot actions (VRAM drift) ----------------------------
+            elif atype == "snapshot":
+                snapshot = output.get("snapshot", {})
+                drift = _compute_vram_drift(snapshot)
+                if drift is not None:
+                    prev = metrics.get("vram_drift_max_percent")
+                    if prev is None or drift > prev:
+                        metrics["vram_drift_max_percent"] = drift
+
+    # -- HTTP error rate --------------------------------------------------
+    if total_requests > 0:
+        metrics["http_error_rate"] = error_requests / total_requests
+
+    # -- Model metrics ----------------------------------------------------
+    all_model_ids = set(model_request_counts) | set(model_first_cold_start)
+    if all_model_ids:
+        model_metrics = {}
+        for mid in sorted(all_model_ids):
+            model_metrics[mid] = ModelMetrics(
+                model_id=mid,
+                cold_start_ms=model_first_cold_start.get(mid),
+                request_count=model_request_counts.get(mid, 0),
+                error_count=model_error_counts.get(mid, 0),
+            )
+        metrics["model_metrics"] = model_metrics
+
+    return metrics
+
+
+def _compute_vram_drift(snapshot: dict[str, Any]) -> Optional[float]:
+    """Compute max VRAM drift % between nvidia-smi and concerto /status.
+
+    Returns None if either data source is missing.
+    """
+    nvidia_smi = snapshot.get("nvidia_smi")
+    concerto_status = snapshot.get("concerto_status")
+    if not nvidia_smi or not concerto_status:
+        return None
+    nvidia_gpus = nvidia_smi.get("gpus", [])
+    concerto_gpus = concerto_status.get("gpus", [])
+    if not nvidia_gpus or not concerto_gpus:
+        return None
+
+    max_drift = 0.0
+    for nvidia_gpu in nvidia_gpus:
+        gpu_idx = nvidia_gpu.get("index")
+        nvidia_used_mb = nvidia_gpu.get("memory.used", 0)
+        if nvidia_used_mb <= 0:
+            continue
+
+        # Find matching concerto GPU
+        for c_gpu in concerto_gpus:
+            if c_gpu.get("id") != gpu_idx:
+                continue
+            # concerto reports memory_used as a human string like "13.4 GiB"
+            concerto_used_str = c_gpu.get("memory_used", "0")
+            concerto_used_mb = _parse_memory_to_mb(concerto_used_str)
+            if concerto_used_mb is None:
+                continue
+            drift = abs(concerto_used_mb - nvidia_used_mb) / nvidia_used_mb * 100
+            max_drift = max(max_drift, drift)
+            break
+
+    return max_drift if max_drift > 0.0 or nvidia_gpus else None
+
+
+def _parse_memory_to_mb(mem_str: str) -> Optional[float]:
+    """Parse a human-readable memory string to MB.
+
+    Handles formats like "13.4 GiB", "372.3 MiB", "2.2 GiB".
+    """
+    if not isinstance(mem_str, str):
+        return None
+    mem_str = mem_str.strip()
+    try:
+        parts = mem_str.split()
+        if len(parts) == 2:
+            value = float(parts[0])
+            unit = parts[1].lower()
+            if unit in ("gib", "gb"):
+                return value * 1024
+            elif unit in ("mib", "mb"):
+                return value
+            elif unit in ("kib", "kb"):
+                return value / 1024
+        # Try bare number (assume bytes)
+        return float(mem_str) / (1024 * 1024)
+    except (ValueError, IndexError):
+        return None
+
+
+def _read_telemetry_counters(telemetry_dir: Path) -> dict[str, Any]:
+    """Read launched/stopped counts from concerto-metrics telemetry.
+
+    Parses the last line of ``concerto-metrics.jsonl`` to get the final
+    values of ``concerto_backend_launches_total`` and
+    ``concerto_eviction_total`` Prometheus counters.
+    """
+    import json as _json
+
+    metrics_file = telemetry_dir / "concerto-metrics.jsonl"
+    if not metrics_file.exists():
+        return {}
+
+    # Read the last non-empty line
+    last_line = ""
+    try:
+        with open(metrics_file) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    last_line = line
+    except OSError:
+        return {}
+
+    if not last_line:
+        return {}
+
+    try:
+        row = _json.loads(last_line)
+    except _json.JSONDecodeError:
+        return {}
+
+    result: dict[str, Any] = {}
+    # The metrics sampler flattens Prometheus text into a dict.
+    # Counter names vary by metrics crate version; try common patterns.
+    data = row.get("data", row)
+    for key in ("concerto_backend_launches_total", "concerto_backend_launches"):
+        val = data.get(key)
+        if val is not None:
+            try:
+                result["launched_count"] = int(float(val))
+            except (ValueError, TypeError):
+                pass
+            break
+
+    for key in ("concerto_eviction_total", "concerto_eviction"):
+        val = data.get(key)
+        if val is not None:
+            try:
+                result["stopped_count"] = int(float(val))
+            except (ValueError, TypeError):
+                pass
+            break
+
+    return result
+
+
+def _evaluate_exit_criteria(
+    criteria_spec: dict[str, Any],
+    metrics: dict[str, Any],
+) -> ExitCriteriaResults:
+    """Compare computed metrics against scenario exit criteria thresholds.
+
+    Each criterion is independently evaluated. If the metric required to
+    evaluate a criterion is None (not computed), the result is None
+    (could not evaluate).
+    """
+    launched = metrics.get("launched_count")
+    stopped = metrics.get("stopped_count")
+    http_err = metrics.get("concurrent_load_error_rate")
+    vram_drift = metrics.get("vram_drift_max_percent")
+    shutdown_time = metrics.get("graceful_shutdown_wall_time_secs")
+    orphans = metrics.get("orphan_processes_after_shutdown")
+
+    launched_threshold = criteria_spec.get("launched_count_gte")
+    stopped_threshold = criteria_spec.get("stopped_count_gte")
+    http_err_threshold = criteria_spec.get("http_error_rate_max")
+    vram_threshold = criteria_spec.get("vram_drift_max_percent")
+    shutdown_threshold = criteria_spec.get(
+        "graceful_shutdown_wall_time_max_secs"
+    )
+    orphan_threshold = criteria_spec.get("orphan_processes_after_shutdown_max")
+
+    return ExitCriteriaResults(
+        launched_count_ok=(
+            launched >= launched_threshold
+            if launched is not None and launched_threshold is not None
+            else None
+        ),
+        stopped_count_ok=(
+            stopped >= stopped_threshold
+            if stopped is not None and stopped_threshold is not None
+            else None
+        ),
+        http_error_rate_ok=(
+            http_err <= http_err_threshold
+            if http_err is not None and http_err_threshold is not None
+            else None
+        ),
+        vram_drift_ok=(
+            vram_drift < vram_threshold
+            if vram_drift is not None and vram_threshold is not None
+            else None
+        ),
+        graceful_shutdown_time_ok=(
+            shutdown_time < shutdown_threshold
+            if shutdown_time is not None and shutdown_threshold is not None
+            else None
+        ),
+        orphan_processes_ok=(
+            orphans <= orphan_threshold
+            if orphans is not None and orphan_threshold is not None
+            else None
+        ),
     )
 
 
