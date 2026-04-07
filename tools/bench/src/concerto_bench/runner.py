@@ -853,6 +853,16 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
         except ArtifactError as exc:
             logger.warning("failed to copy concerto logs: %s", exc)
 
+        # -- Post-shutdown orphan process check ----------------------------
+        # After the ConcertoProcess context manager has sent SIGTERM/SIGKILL,
+        # check if any backend processes survived.
+        orphan_count = _count_orphan_backend_processes()
+        if orphan_count > 0:
+            logger.warning(
+                "%d orphan backend process(es) detected after shutdown",
+                orphan_count,
+            )
+
         if failed_step_names or sampler_errors:
             if exit_status == "success":
                 exit_status = "partial_failure"
@@ -879,6 +889,7 @@ async def run_scenario(options: RunnerOptions) -> RunResult:
             failed_step_names=failed_step_names,
             exit_status=exit_status,
             telemetry_dir=builder.telemetry_dir(),
+            orphan_count=orphan_count,
         )
 
         host_info = _build_host_info(
@@ -1309,6 +1320,7 @@ def _build_summary(
     failed_step_names: list[str],
     exit_status: str,
     telemetry_dir: Optional[Path] = None,
+    orphan_count: Optional[int] = None,
 ) -> SummaryV1:
     """Assemble the v1 :class:`SummaryV1` from captured step results.
 
@@ -1326,6 +1338,10 @@ def _build_summary(
     if telemetry_dir is not None:
         telemetry_metrics = _read_telemetry_counters(telemetry_dir)
         metrics.update(telemetry_metrics)
+
+    # -- Inject post-shutdown orphan count ---------------------------------
+    if orphan_count is not None:
+        metrics["orphan_processes_after_shutdown"] = orphan_count
 
     # -- Evaluate exit criteria -------------------------------------------
     exit_criteria_results = _evaluate_exit_criteria(
@@ -1351,6 +1367,7 @@ def _build_summary(
         orphan_processes_after_shutdown=metrics.get(
             "orphan_processes_after_shutdown"
         ),
+        routing_decision_latency=metrics.get("routing_decision_latency"),
         concurrent_load_throughput_rps=metrics.get(
             "concurrent_load_throughput_rps"
         ),
@@ -1528,11 +1545,12 @@ def _parse_memory_to_mb(mem_str: str) -> Optional[float]:
 
 
 def _read_telemetry_counters(telemetry_dir: Path) -> dict[str, Any]:
-    """Read launched/stopped counts from concerto-metrics telemetry.
+    """Read counters and histograms from concerto-metrics telemetry.
 
     Parses the last line of ``concerto-metrics.jsonl`` to get the final
-    values of ``concerto_backend_launches_total`` and
-    ``concerto_eviction_total`` Prometheus counters.
+    values of Prometheus counters (``concerto_backend_launches_total``,
+    ``concerto_eviction_total``) and histograms
+    (``concerto_routing_decision_seconds``).
     """
     import json as _json
 
@@ -1560,9 +1578,12 @@ def _read_telemetry_counters(telemetry_dir: Path) -> dict[str, Any]:
         return {}
 
     result: dict[str, Any] = {}
-    # The metrics sampler flattens Prometheus text into a dict.
-    # Counter names vary by metrics crate version; try common patterns.
+    # The metrics sampler flattens Prometheus text into a dict under
+    # a "metrics" key (see ConcertoMetricsSampler.sample_once).
     data = row.get("data", row)
+    if "metrics" in data:
+        data = data["metrics"]
+
     for key in ("concerto_backend_launches_total", "concerto_backend_launches"):
         val = data.get(key)
         if val is not None:
@@ -1581,7 +1602,103 @@ def _read_telemetry_counters(telemetry_dir: Path) -> dict[str, Any]:
                 pass
             break
 
+    # -- Routing decision latency histogram --------------------------------
+    histogram = _parse_prometheus_histogram(data, "concerto_routing_decision_seconds")
+    if histogram is not None:
+        result["routing_decision_latency"] = histogram
+
     return result
+
+
+def _parse_prometheus_histogram(
+    data: dict[str, Any], metric_name: str
+) -> Optional[LatencyHistogram]:
+    """Parse a Prometheus histogram from flattened sampler data.
+
+    The sampler stores bucket samples as keys like
+    ``<metric>_bucket|le=0.005`` with cumulative counts as values,
+    plus ``<metric>_sum`` and ``<metric>_count``.
+
+    Returns a :class:`LatencyHistogram` with p50/p95/p99/max in
+    milliseconds, or ``None`` if insufficient data.
+    """
+    # Collect bucket boundaries and their cumulative counts
+    bucket_prefix = f"{metric_name}_bucket|le="
+    buckets: list[tuple[float, float]] = []  # (upper_bound, cumulative_count)
+    for key, value in data.items():
+        if not key.startswith(bucket_prefix):
+            continue
+        le_str = key[len(bucket_prefix):]
+        try:
+            le = float(le_str)
+            count = float(value)
+        except (ValueError, TypeError):
+            continue
+        if le != float("+inf"):
+            buckets.append((le, count))
+
+    total_count_raw = data.get(f"{metric_name}_count")
+    if total_count_raw is None:
+        return None
+    try:
+        total_count = int(float(total_count_raw))
+    except (ValueError, TypeError):
+        return None
+    if total_count == 0:
+        return None
+
+    # Sort by upper bound
+    buckets.sort(key=lambda b: b[0])
+
+    if not buckets:
+        # No bucket data available — fall back to mean from sum/count
+        total_sum = data.get(f"{metric_name}_sum")
+        if total_sum is not None:
+            try:
+                mean_s = float(total_sum) / total_count
+                mean_ms = mean_s * 1000.0
+                return LatencyHistogram(
+                    p50_ms=mean_ms, p95_ms=mean_ms, p99_ms=mean_ms,
+                    max_ms=mean_ms, count=total_count,
+                )
+            except (ValueError, TypeError, ZeroDivisionError):
+                pass
+        return None
+
+    def _percentile_from_buckets(
+        sorted_buckets: list[tuple[float, float]], pct: float, total: int
+    ) -> float:
+        """Estimate a percentile from cumulative histogram buckets.
+
+        Uses linear interpolation within the bucket that contains the
+        target rank, converting seconds to milliseconds.
+        """
+        target = pct / 100.0 * total
+        prev_count = 0.0
+        prev_bound = 0.0
+        for upper_bound, cum_count in sorted_buckets:
+            if cum_count >= target:
+                # Interpolate within this bucket
+                bucket_width = upper_bound - prev_bound
+                bucket_count = cum_count - prev_count
+                if bucket_count > 0:
+                    fraction = (target - prev_count) / bucket_count
+                    value_s = prev_bound + fraction * bucket_width
+                else:
+                    value_s = upper_bound
+                return value_s * 1000.0  # seconds → ms
+            prev_count = cum_count
+            prev_bound = upper_bound
+        # Beyond the last finite bucket — use the last bucket's bound
+        return sorted_buckets[-1][0] * 1000.0
+
+    return LatencyHistogram(
+        p50_ms=_percentile_from_buckets(buckets, 50, total_count),
+        p95_ms=_percentile_from_buckets(buckets, 95, total_count),
+        p99_ms=_percentile_from_buckets(buckets, 99, total_count),
+        max_ms=sorted_buckets[-1][0] * 1000.0,
+        count=total_count,
+    )
 
 
 def _evaluate_exit_criteria(
@@ -1893,6 +2010,34 @@ def _query_concerto_version(binary: Path) -> str:
     if not text:
         text = (result.stderr or b"").decode("utf-8", errors="replace").strip()
     return text or "unknown"
+
+
+def _count_orphan_backend_processes() -> int:
+    """Count backend processes still alive after concerto shutdown.
+
+    Checks for common backend patterns (vllm, mock-inference-backend)
+    using ``pgrep``. Returns 0 if ``pgrep`` is not available or finds
+    no matches.
+    """
+    patterns = ["mock-inference-backend", "vllm.entrypoints"]
+    total = 0
+    for pattern in patterns:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+                # Filter out our own process
+                our_pid = str(os.getpid())
+                orphans = [p for p in pids if p != our_pid]
+                total += len(orphans)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            pass
+    return total
 
 
 # ---------------------------------------------------------------------------

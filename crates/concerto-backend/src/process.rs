@@ -106,7 +106,7 @@ impl Default for ProcessBackendManager {
 impl BackendManager for ProcessBackendManager {
     async fn launch(&self, spec: &ModelSpec, gpu_id: GpuId) -> Result<BackendHandle, BackendError> {
         let port = self.ports.allocate().ok_or(BackendError::NoFreePort)?;
-        let mut command = build_command(spec, gpu_id, port);
+        let mut command = build_command(spec, gpu_id, port, None);
         let health_path = default_health_path(&spec.engine);
         info!(model_id = %spec.id, %gpu_id, port, engine = ?spec.engine, health_path = %health_path, "spawning backend process");
 
@@ -221,9 +221,13 @@ pub(crate) fn default_health_path(engine: &EngineType) -> String {
 
 /// Resolve the Python interpreter for engines that launch via `python -m …`.
 ///
-/// Checks `CONCERTO_PYTHON` first so operators can point at a virtualenv
+/// If `python_override` is provided, use that directly. Otherwise checks
+/// `CONCERTO_PYTHON` first so operators can point at a virtualenv
 /// (e.g. `/root/vllm-venv/bin/python`). Falls back to plain `"python"`.
-fn python_binary() -> String {
+fn python_binary(python_override: Option<&str>) -> String {
+    if let Some(path) = python_override {
+        return path.to_string();
+    }
     std::env::var("CONCERTO_PYTHON").unwrap_or_else(|_| "python".to_string())
 }
 
@@ -233,13 +237,22 @@ fn python_binary() -> String {
 /// This is exposed publicly so tests can assert on the command shape without
 /// spawning real processes. The `CUDA_VISIBLE_DEVICES` environment variable
 /// is set to `gpu_id` so the child sees exactly one device.
-pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
+///
+/// `python_override` lets callers (including tests) supply the Python
+/// interpreter path directly, bypassing the `CONCERTO_PYTHON` env var
+/// lookup. Production callers pass `None`.
+pub fn build_command(
+    spec: &ModelSpec,
+    gpu_id: GpuId,
+    port: u16,
+    python_override: Option<&str>,
+) -> Command {
     let port_str = port.to_string();
     let weight = spec.weight_path.as_str();
 
     let mut command = match &spec.engine {
         EngineType::Vllm => {
-            let mut c = Command::new(python_binary());
+            let mut c = Command::new(python_binary(python_override));
             c.args([
                 "-m",
                 "vllm.entrypoints.openai.api_server",
@@ -258,7 +271,7 @@ pub fn build_command(spec: &ModelSpec, gpu_id: GpuId, port: u16) -> Command {
             c
         }
         EngineType::Sglang => {
-            let mut c = Command::new(python_binary());
+            let mut c = Command::new(python_binary(python_override));
             c.args([
                 "-m",
                 "sglang.launch_server",

@@ -10,10 +10,10 @@ a dict of ``{metric_key: float_value}`` rows in
   serialises to the same key. The label-pair separator is ``,`` with
   no spaces.
 * ``<metric_name>_sum`` / ``<metric_name>_count`` — histogram and
-  summary aggregates are retained at their own keys. Internal
-  histogram buckets are ignored; the analyzer can reconstruct tail
-  latencies from the routing-decision latency explicitly captured
-  elsewhere.
+  summary aggregates are retained at their own keys.
+* ``<metric_name>_bucket|le=<bound>`` — histogram bucket cumulative
+  counts, retained so the analyzer can compute percentiles (e.g.
+  routing-decision latency p50/p95/p99).
 
 The text parse uses ``prometheus_client.parser.text_string_to_metric_families``
 so the sampler never has to own a Prometheus parser.
@@ -59,11 +59,11 @@ class ConcertoMetricsSamplerConfig(SamplerConfig):
 def _flatten_metric_families(text: str) -> dict[str, float]:
     """Flatten a Prometheus scrape into ``{key: float}`` rows.
 
-    Counter + gauge samples land at their natural name or
-    ``name|label=value,...`` key. Histogram / summary ``_bucket``
-    samples are dropped; ``_sum`` and ``_count`` are retained (they
-    come through the parser as distinct samples with the suffix
-    already baked into ``sample.name``).
+    All sample types are retained: counters, gauges, histogram
+    ``_sum`` / ``_count`` / ``_bucket``, and summary quantiles.
+    Bucket samples land at keys like
+    ``concerto_routing_decision_seconds_bucket|le=0.005`` so the
+    analyzer can reconstruct percentiles from the cumulative CDF.
 
     NaN values are dropped rather than round-tripped through JSON
     because the :class:`TelemetrySample` ``values`` dict is later
@@ -73,10 +73,6 @@ def _flatten_metric_families(text: str) -> dict[str, float]:
     for family in text_string_to_metric_families(text):
         for sample in family.samples:
             name = sample.name
-            if name.endswith("_bucket"):
-                # Histogram bucket internals — the analyzer is not
-                # interested in the full CDF at the sampler level.
-                continue
             try:
                 value = float(sample.value)
             except (TypeError, ValueError):

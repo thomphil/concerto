@@ -91,12 +91,11 @@ def test_flatten_metric_families_key_shapes() -> None:
     assert flat["concerto_requests_total|decision=cold_start"] == 3.0
     # Gauge with no labels — key is just ``name``.
     assert flat["concerto_active_backends"] == 2.0
-    # Histogram sum + count retained, buckets dropped.
+    # Histogram sum + count + buckets all retained.
     assert flat["concerto_routing_decision_duration_seconds_sum"] == pytest.approx(0.18)
     assert flat["concerto_routing_decision_duration_seconds_count"] == 25.0
-    assert not any(
-        k.endswith("_bucket") or "le=" in k for k in flat.keys()
-    )
+    assert flat["concerto_routing_decision_duration_seconds_bucket|le=0.005"] == 10.0
+    assert flat["concerto_routing_decision_duration_seconds_bucket|le=0.01"] == 20.0
 
 
 def test_flatten_metric_families_handles_multi_label_sorted_keys() -> None:

@@ -334,8 +334,11 @@ async fn wait_for_vram_free(state: &AppState, gpu_id: GpuId, required: bytesize:
     loop {
         let snapshots = state.gpu.snapshot().await;
         if let Some(snap) = snapshots.iter().find(|s| s.id == gpu_id) {
-            let free =
-                bytesize::ByteSize::b(snap.memory_total.as_u64().saturating_sub(snap.memory_used.as_u64()));
+            let free = bytesize::ByteSize::b(
+                snap.memory_total
+                    .as_u64()
+                    .saturating_sub(snap.memory_used.as_u64()),
+            );
             if free >= required {
                 debug!(%gpu_id, %free, %required, "VRAM available after eviction");
                 return;

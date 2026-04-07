@@ -45,14 +45,11 @@ fn env(cmd: &Command, key: &str) -> Option<String> {
 
 #[test]
 fn vllm_command_shape() {
-    // Clear any override so the default path is exercised.
-    std::env::remove_var("CONCERTO_PYTHON");
-
     let spec = spec_with_engine(
         EngineType::Vllm,
         vec!["--dtype", "float16", "--max-model-len", "4096"],
     );
-    let cmd = build_command(&spec, GpuId(0), 8123);
+    let cmd = build_command(&spec, GpuId(0), 8123, None);
 
     assert_eq!(program(&cmd), "python");
     let args = args(&cmd);
@@ -72,26 +69,26 @@ fn vllm_command_shape() {
 }
 
 #[test]
-fn concerto_python_env_overrides_vllm_binary() {
-    std::env::set_var("CONCERTO_PYTHON", "/root/vllm-venv/bin/python");
-
+fn python_override_selects_custom_binary() {
     let spec = spec_with_engine(EngineType::Vllm, vec![]);
-    let cmd = build_command(&spec, GpuId(0), 8123);
+    let cmd = build_command(&spec, GpuId(0), 8123, Some("/root/vllm-venv/bin/python"));
     assert_eq!(program(&cmd), "/root/vllm-venv/bin/python");
 
     // SGLang also uses the override.
     let sglang_spec = spec_with_engine(EngineType::Sglang, vec![]);
-    let sglang_cmd = build_command(&sglang_spec, GpuId(0), 8124);
+    let sglang_cmd = build_command(
+        &sglang_spec,
+        GpuId(0),
+        8124,
+        Some("/root/vllm-venv/bin/python"),
+    );
     assert_eq!(program(&sglang_cmd), "/root/vllm-venv/bin/python");
-
-    // Clean up to avoid polluting other tests.
-    std::env::remove_var("CONCERTO_PYTHON");
 }
 
 #[test]
 fn llama_cpp_command_uses_short_m_flag() {
     let spec = spec_with_engine(EngineType::LlamaCpp, vec!["--ctx-size", "4096"]);
-    let cmd = build_command(&spec, GpuId(0), 8200);
+    let cmd = build_command(&spec, GpuId(0), 8200, None);
 
     assert_eq!(program(&cmd), "llama-server");
     let args = args(&cmd);
@@ -106,10 +103,8 @@ fn llama_cpp_command_uses_short_m_flag() {
 
 #[test]
 fn sglang_command_uses_model_path_flag() {
-    std::env::remove_var("CONCERTO_PYTHON");
-
     let spec = spec_with_engine(EngineType::Sglang, vec![]);
-    let cmd = build_command(&spec, GpuId(2), 8300);
+    let cmd = build_command(&spec, GpuId(2), 8300, None);
 
     assert_eq!(program(&cmd), "python");
     let args = args(&cmd);
@@ -125,7 +120,7 @@ fn sglang_command_uses_model_path_flag() {
 #[test]
 fn mock_engine_uses_mock_inference_backend_binary() {
     let spec = spec_with_engine(EngineType::Mock, vec!["--latency-ms", "5"]);
-    let cmd = build_command(&spec, GpuId(0), 8400);
+    let cmd = build_command(&spec, GpuId(0), 8400, None);
 
     assert_eq!(program(&cmd), "mock-inference-backend");
     let args = args(&cmd);
@@ -138,17 +133,17 @@ fn mock_engine_uses_mock_inference_backend_binary() {
 #[test]
 fn cuda_visible_devices_env_is_set_to_gpu_id() {
     let spec = spec_with_engine(EngineType::Vllm, vec![]);
-    let cmd = build_command(&spec, GpuId(3), 8500);
+    let cmd = build_command(&spec, GpuId(3), 8500, None);
     assert_eq!(env(&cmd, "CUDA_VISIBLE_DEVICES").as_deref(), Some("3"));
 
-    let cmd_zero = build_command(&spec, GpuId(0), 8501);
+    let cmd_zero = build_command(&spec, GpuId(0), 8501, None);
     assert_eq!(env(&cmd_zero, "CUDA_VISIBLE_DEVICES").as_deref(), Some("0"));
 }
 
 #[test]
 fn engine_args_preserve_order_after_builtin_args() {
     let spec = spec_with_engine(EngineType::Vllm, vec!["--first", "1", "--second", "2"]);
-    let cmd = build_command(&spec, GpuId(0), 8600);
+    let cmd = build_command(&spec, GpuId(0), 8600, None);
     let args = args(&cmd);
 
     let first = args.iter().position(|a| a == "--first").unwrap();
@@ -174,7 +169,7 @@ fn custom_engine_substitutes_port_token() {
         },
         vec![],
     );
-    let cmd = build_command(&spec, GpuId(1), 8123);
+    let cmd = build_command(&spec, GpuId(1), 8123, None);
 
     assert_eq!(program(&cmd), "my-inference-server");
     let args = args(&cmd);
@@ -200,7 +195,7 @@ fn custom_engine_appends_port_when_no_placeholder() {
         },
         vec![],
     );
-    let cmd = build_command(&spec, GpuId(0), 8999);
+    let cmd = build_command(&spec, GpuId(0), 8999, None);
 
     assert_eq!(program(&cmd), "other-server");
     let args = args(&cmd);

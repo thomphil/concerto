@@ -415,6 +415,41 @@ def estimate_cmd(
 
 
 # ---------------------------------------------------------------------------
+# diff
+# ---------------------------------------------------------------------------
+
+
+@app.command("diff")
+def diff_cmd(
+    baseline: Path = typer.Argument(
+        ...,
+        help="Path to the baseline artifact (tarball or directory).",
+    ),
+    candidate: Path = typer.Argument(
+        ...,
+        help="Path to the candidate artifact (tarball or directory) to compare against the baseline.",
+    ),
+) -> None:
+    """Compare two artifacts and report regressions.
+
+    Loads the summaries from both artifacts and compares key metrics
+    side-by-side. Highlights regressions (candidate worse than baseline)
+    with a ``[REGRESSION]`` marker. Exit code 0 if no regressions, 1 if
+    any regression detected.
+    """
+    from concerto_bench.analyze.diff import diff_artifacts, DiffError
+
+    try:
+        report, has_regression = diff_artifacts(baseline, candidate)
+    except DiffError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo(report)
+    raise typer.Exit(code=1 if has_regression else 0)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
