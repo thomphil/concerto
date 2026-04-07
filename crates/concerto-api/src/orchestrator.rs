@@ -202,7 +202,17 @@ async fn do_launch(
     gpu_id: GpuId,
     evict: Vec<ModelId>,
 ) -> Result<BackendTarget, ApiError> {
-    // --- 3. Evict any models the router asked us to evict. ---------------
+    // --- 3a. Look up the model spec first — we need vram_required for
+    //         the post-eviction VRAM poll. This is a read-only lookup.
+    let spec = {
+        let cluster = state.cluster.lock().await;
+        cluster
+            .get_model_spec(model_id)
+            .cloned()
+            .ok_or_else(|| ApiError::ModelNotFound(model_id.clone()))?
+    };
+
+    // --- 3b. Evict any models the router asked us to evict. -------------
     let mut evicted_any = false;
     for victim in &evict {
         let handle = {
@@ -220,21 +230,14 @@ async fn do_launch(
         counter!(EVICTION_TOTAL).increment(1);
     }
 
-    // Brief pause after eviction so the kernel reclaims GPU memory from
-    // killed child processes. The backend stop() already kills the
-    // process tree, but CUDA resource teardown is asynchronous.
+    // After eviction, wait for CUDA to actually free the GPU memory.
+    // The backend stop() kills the process tree, but CUDA resource
+    // teardown is asynchronous — launching immediately would OOM.
+    // Poll NVML until the target GPU shows enough free memory, with
+    // a timeout fallback so we never block forever.
     if evicted_any {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        wait_for_vram_free(state, gpu_id, spec.vram_required).await;
     }
-
-    // --- 4. Look up the model spec we're about to launch. ----------------
-    let spec = {
-        let cluster = state.cluster.lock().await;
-        cluster
-            .get_model_spec(model_id)
-            .cloned()
-            .ok_or_else(|| ApiError::ModelNotFound(model_id.clone()))?
-    };
 
     // --- 5. Launch the backend, bounded by cold_start_timeout. -----------
     let cold_start_timeout = Duration::from_secs(state.config.routing.cold_start_timeout_secs);
@@ -313,6 +316,41 @@ async fn finalise_launch(
         };
         // A send error just means no subscribers were waiting; that's fine.
         let _ = sender.send(msg);
+    }
+}
+
+/// Poll NVML until the target GPU has enough free VRAM for the incoming model.
+///
+/// CUDA resource teardown after process kill is asynchronous — the driver may
+/// hold onto memory for hundreds of milliseconds after the owning process exits.
+/// Rather than sleeping a fixed duration (fragile, wastes time on fast GPUs,
+/// races on slow ones) we poll the real telemetry source at 250 ms intervals
+/// with a hard timeout so we never block forever.
+async fn wait_for_vram_free(state: &AppState, gpu_id: GpuId, required: bytesize::ByteSize) {
+    const POLL_INTERVAL: Duration = Duration::from_millis(250);
+    const TIMEOUT: Duration = Duration::from_secs(15);
+
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let snapshots = state.gpu.snapshot().await;
+        if let Some(snap) = snapshots.iter().find(|s| s.id == gpu_id) {
+            let free =
+                bytesize::ByteSize::b(snap.memory_total.as_u64().saturating_sub(snap.memory_used.as_u64()));
+            if free >= required {
+                debug!(%gpu_id, %free, %required, "VRAM available after eviction");
+                return;
+            }
+            debug!(%gpu_id, %free, %required, "waiting for VRAM reclamation");
+        }
+        if Instant::now() >= deadline {
+            warn!(
+                %gpu_id,
+                timeout_secs = TIMEOUT.as_secs(),
+                "VRAM reclamation timeout; proceeding with launch anyway"
+            );
+            return;
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
