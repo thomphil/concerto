@@ -38,16 +38,10 @@ A v0.2 warm pool — keeping idle model processes resident in CPU RAM and resumi
 
 ## Roadmap
 
-- [x] Routing core with LRU / LFU / size-weighted eviction
-- [x] GPU telemetry (NVML + mock) with health classification
-- [x] Backend process management for vLLM, llama.cpp, SGLang
-- [x] TOML configuration
-- [x] OpenAI-compatible HTTP API with SSE streaming
-- [x] CLI binary with graceful shutdown
-- [x] Prometheus metrics endpoint
-- [x] End-to-end integration scenarios
-- [ ] Real-hardware validation on rented GPUs (in flight)
-- [ ] Published container image and tagged v0.1.0 release
+- [x] **Sprint 1** — runnable server: routing core, GPU telemetry (NVML + mock), backend process management (vLLM, llama.cpp, SGLang), TOML config, OpenAI-compatible HTTP API with SSE streaming, CLI binary with graceful shutdown, end-to-end integration scenarios
+- [x] **Sprint 2** — production hardening: Prometheus `/metrics` endpoint, Python bench rig, real-hardware validation on 2× RTX A4000 (8/8 scenarios passing under sustained concurrent load)
+- [ ] **Sprint 3** *(in progress)* — v0.1.0 release prep: orchestrator hardening, public quickstart and deployment docs, container image
+- [ ] **Sprint 4** — launch: tagged v0.1.0, technical writeup, public announcement
 
 ## Architecture
 
@@ -73,6 +67,29 @@ A v0.2 warm pool — keeping idle model processes resident in CPU RAM and resumi
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for detail.
+
+## Install
+
+Linux with NVIDIA GPUs (recommended):
+
+```sh
+cargo install concerto-cli --features nvml
+concerto --config concerto.toml
+```
+
+Container:
+
+```sh
+docker run --gpus all -v $PWD/concerto.toml:/etc/concerto.toml -p 8080:8080 ghcr.io/thomphil/concerto:latest
+```
+
+For development on macOS or any host without NVIDIA GPUs, omit the `nvml` feature and run with `--mock-gpus N` for a self-contained dev mode. Full walkthrough — config layout, model registry, systemd unit, troubleshooting — in [`docs/quickstart.md`](docs/quickstart.md).
+
+## Benchmarks
+
+Validated end-to-end on 2× NVIDIA RTX A4000 (Vast.ai) running real vLLM backends across three models (qwen2.5-0.5b, phi-3-mini, qwen2.5-7b). The Sprint 2 validation scenario covers cold start, multi-model routing, LRU eviction, 5-minute sustained concurrent load (20 clients, 379/379 successful, 0% error rate), backend crash recovery via SIGKILL + auto re-launch, orphan detection, and graceful shutdown — 8/8 steps passed.
+
+See [`docs/benchmarks.md`](docs/benchmarks.md) for the full run record, latencies, and configuration.
 
 ## Building
 
