@@ -59,6 +59,18 @@ pub struct RoutingSection {
     /// time-to-first-byte is bounded). See `docs/troubleshooting.md`.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
+
+    /// Maximum number of seconds [`graceful_shutdown`] will wait for
+    /// in-flight requests to drain before stopping backends. The drain loop
+    /// polls the in-flight counter every 50ms; once it reaches zero (or
+    /// the deadline elapses) shutdown proceeds. Streaming responses are
+    /// counted in this number — they receive a `shutdown` notification on
+    /// SIGTERM and emit a final `data: [DONE]` event before closing, so
+    /// they decrement the counter promptly.
+    ///
+    /// [`graceful_shutdown`]: ../../concerto_api/shutdown/fn.graceful_shutdown.html
+    #[serde(default = "default_shutdown_drain_secs")]
+    pub shutdown_drain_secs: u64,
 }
 
 impl Default for RoutingSection {
@@ -74,6 +86,7 @@ impl Default for RoutingSection {
             port_range_start: default_port_range_start(),
             port_range_end: default_port_range_end(),
             request_timeout_secs: default_request_timeout_secs(),
+            shutdown_drain_secs: default_shutdown_drain_secs(),
         }
     }
 }
@@ -116,4 +129,8 @@ fn default_port_range_end() -> u16 {
 
 fn default_request_timeout_secs() -> u64 {
     0
+}
+
+fn default_shutdown_drain_secs() -> u64 {
+    30
 }

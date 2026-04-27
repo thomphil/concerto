@@ -17,7 +17,9 @@ use concerto_core::ModelId;
 use futures::StreamExt;
 use metrics::counter;
 use serde_json::Value;
+use tokio::sync::Notify;
 
+use crate::app::InFlightGuard;
 use crate::error::ApiError;
 use crate::metrics::REQUESTS_TOTAL;
 use crate::orchestrator::{route_and_dispatch, RoutingKind};
@@ -28,7 +30,11 @@ pub async fn completions(
     State(state): State<AppState>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<Response, ApiError> {
-    let outcome = completions_inner(&state, req).await;
+    // Track this request for the graceful-shutdown drain. The guard moves
+    // into completions_inner so that streaming bodies can transfer it into
+    // the body stream and decrement only when the stream completes.
+    let guard = InFlightGuard::new(state.in_flight.clone());
+    let outcome = completions_inner(&state, req, guard).await;
     let decision_label = match &outcome {
         Ok((_, kind)) => kind.label(),
         Err(e) => decision_label_for_error(e),
@@ -43,6 +49,7 @@ pub async fn completions(
 async fn completions_inner(
     state: &AppState,
     req: ChatCompletionRequest,
+    guard: InFlightGuard,
 ) -> Result<(Response, RoutingKind), ApiError> {
     let model_id = ModelId(req.model.clone());
     tracing::info!(model = %model_id, stream = req.stream, "incoming chat completion");
@@ -85,10 +92,19 @@ async fn completions_inner(
         // Byte-forward the stream. Do NOT re-parse SSE events — the upstream
         // backend already produces them in the correct shape (including the
         // `data: [DONE]` terminator) and we are a transparent proxy.
-        let stream = upstream.bytes_stream().map(|chunk| {
-            chunk.map_err(|e| std::io::Error::other(format!("upstream stream error: {e}")))
-        });
-        let body = Body::from_stream(stream);
+        //
+        // Two enhancements over the trivial proxy: (1) the [`InFlightGuard`]
+        // is moved into the stream so it drops only when the body finishes
+        // or is cancelled, keeping `state.in_flight` accurate during
+        // graceful shutdown; (2) `state.shutdown` is selected against
+        // each chunk so SIGTERM mid-stream emits a final `data: [DONE]`
+        // and closes cleanly rather than blocking forever.
+        let upstream_stream = upstream.bytes_stream();
+        let body = Body::from_stream(shutdown_aware_stream(
+            upstream_stream,
+            state.shutdown.clone(),
+            guard,
+        ));
         let mut response = Response::builder()
             .status(status_code)
             .body(body)
@@ -97,6 +113,8 @@ async fn completions_inner(
         Ok((response, target.kind))
     } else {
         // Non-streaming: read the whole body into memory and forward.
+        // The [`InFlightGuard`] held by this function drops on return,
+        // decrementing the in-flight counter once the body has been read.
         let bytes = upstream
             .bytes()
             .await
@@ -106,7 +124,60 @@ async fn completions_inner(
         for (k, v) in headers.iter() {
             response_headers.insert(k, v.clone());
         }
+        drop(guard);
         Ok((response, target.kind))
+    }
+}
+
+/// Wrap an upstream byte stream so:
+///
+/// 1. The supplied [`InFlightGuard`] drops when the body finishes or the
+///    consumer cancels — keeping `AppState::in_flight` accurate during the
+///    shutdown drain.
+/// 2. A `state.shutdown` notification short-circuits the proxy with a final
+///    `data: [DONE]\n\n` event, so SIGTERM mid-stream returns to the client
+///    cleanly instead of hanging until the connection is force-closed.
+fn shutdown_aware_stream<S>(
+    mut upstream: S,
+    shutdown: std::sync::Arc<Notify>,
+    guard: InFlightGuard,
+) -> impl futures::Stream<Item = std::result::Result<bytes::Bytes, std::io::Error>>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>
+        + Unpin
+        + Send
+        + 'static,
+{
+    async_stream::stream! {
+        // Hold the guard for the lifetime of this generator so it drops
+        // on completion *or* cancellation. `_`-prefix avoids the unused-
+        // binding warning.
+        let _guard = guard;
+
+        loop {
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
+            tokio::select! {
+                chunk = upstream.next() => match chunk {
+                    Some(Ok(bytes)) => yield Ok(bytes),
+                    Some(Err(e)) => {
+                        yield Err(std::io::Error::other(
+                            format!("upstream stream error: {e}"),
+                        ));
+                        break;
+                    }
+                    None => break,
+                },
+                _ = &mut notified => {
+                    tracing::info!(
+                        "shutdown notified during streaming response; \
+                         emitting final data: [DONE] and closing"
+                    );
+                    yield Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+                    break;
+                }
+            }
+        }
     }
 }
 

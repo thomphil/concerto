@@ -1,6 +1,7 @@
 //! Shared application state handed to every request and background task.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use concerto_backend::{BackendHandle, BackendManager};
@@ -50,8 +51,31 @@ pub struct AppState {
     pub backends: Arc<Mutex<HashMap<ModelId, BackendHandle>>>,
     /// Notifier used to signal graceful shutdown to background tasks.
     pub shutdown: Arc<Notify>,
+    /// Count of in-flight chat-completion requests. Incremented when a
+    /// chat handler is entered and decremented when it returns (for
+    /// non-streaming) or when the streaming body finishes/cancels (for
+    /// streaming). [`crate::shutdown::graceful_shutdown`] polls this until
+    /// it reaches zero or `routing.shutdown_drain_secs` elapses.
+    pub in_flight: Arc<AtomicUsize>,
     /// Prometheus handle used by the `/metrics` endpoint to render the
     /// current metric snapshot. Installed once per process via
     /// [`crate::metrics::install`]; cloned cheaply into every [`AppState`].
     pub prometheus: Arc<PrometheusHandle>,
+}
+
+/// RAII guard returned by [`AppState::track_in_flight`]. Decrements the
+/// in-flight counter on drop, panic-safe.
+pub struct InFlightGuard(Arc<AtomicUsize>);
+
+impl InFlightGuard {
+    pub fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }

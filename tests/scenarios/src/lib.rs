@@ -60,12 +60,20 @@ fn mock_backend_binary() -> PathBuf {
 }
 
 /// Hands out a unique 100-port range to every scenario harness so parallel
-/// `cargo test` runs don't contend on backend ports. Starts at 19100
-/// (chosen to avoid Prometheus / node_exporter / common dev-server ranges).
+/// `cargo test` runs don't contend on backend ports. Starts at a process-
+/// unique base port so two test binaries running concurrently land in
+/// different windows (each `cargo test` binary is its own process; each
+/// resets the in-process `NEXT` counter to 0).
+///
+/// Base port = 19100 + (pid mod 50) * 200; window = 100 ports. That gives
+/// up to 50 concurrent binaries before the windows overlap, which is far
+/// more than `cargo test`'s default test-threads parallelism.
 fn next_port_range() -> std::ops::Range<u16> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static BASE: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    let base = *BASE.get_or_init(|| 19100 + ((std::process::id() % 50) as u16) * 200);
     let idx = NEXT.fetch_add(1, Ordering::SeqCst);
-    let start = 19100 + (idx as u16) * 100;
+    let start = base + (idx as u16) * 100;
     start..(start + 100)
 }
 
@@ -159,6 +167,10 @@ pub struct ScenarioConfig {
     /// matching production. Set to a small positive value to exercise the
     /// per-request timeout middleware.
     pub request_timeout_secs: u64,
+    /// Override `routing.shutdown_drain_secs` (default 30, too long for
+    /// tests). Scenarios that exercise graceful shutdown set this to a
+    /// few seconds so the test wall-clock stays bounded.
+    pub shutdown_drain_secs: u64,
 }
 
 impl ScenarioConfig {
@@ -169,7 +181,13 @@ impl ScenarioConfig {
             models: vec![],
             health_check_interval_secs: 1,
             request_timeout_secs: 0,
+            shutdown_drain_secs: 5,
         }
+    }
+
+    pub fn with_shutdown_drain_secs(mut self, secs: u64) -> Self {
+        self.shutdown_drain_secs = secs;
+        self
     }
 
     pub fn with_model(mut self, id: &str, vram_gb: u64) -> Self {
@@ -324,6 +342,7 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
         port_range_end: port_range.end,
         cold_start_timeout_secs: 15, // keep tests fast when a spawn is wrong
         request_timeout_secs: cfg.request_timeout_secs,
+        shutdown_drain_secs: cfg.shutdown_drain_secs,
         ..RoutingSection::default()
     };
 
@@ -382,6 +401,7 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: shutdown.clone(),
+        in_flight: Arc::new(AtomicUsize::new(0)),
         prometheus,
     };
 
