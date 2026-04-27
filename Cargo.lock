@@ -348,6 +348,7 @@ dependencies = [
  "async-trait",
  "bytesize",
  "concerto-core",
+ "nix",
  "reqwest",
  "serde",
  "thiserror 2.0.18",
