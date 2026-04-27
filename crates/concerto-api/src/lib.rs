@@ -18,6 +18,7 @@ pub mod orchestrator;
 pub mod routes;
 pub mod server;
 pub mod shutdown;
+pub mod state_file;
 pub mod types;
 
 pub use app::{AppState, LoadResult};
