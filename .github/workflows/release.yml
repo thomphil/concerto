@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # required to create the release
+
+jobs:
+  build-linux:
+    name: Build x86_64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --features nvml -p concerto-cli --target x86_64-unknown-linux-gnu
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="concerto-cli-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${name}"
+          install -m 0755 target/x86_64-unknown-linux-gnu/release/concerto "dist/${name}/concerto"
+          cp LICENSE-MIT LICENSE-APACHE README.md "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-archive
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  build-macos:
+    name: Build aarch64-apple-darwin
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        # No --features nvml on macOS: nvml-wrapper only links on Linux. The
+        # cli's nvml feature gracefully no-ops off Linux but the build is
+        # cleaner without the feature flag.
+        run: cargo build --release -p concerto-cli --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="concerto-cli-${GITHUB_REF_NAME}-aarch64-apple-darwin"
+          mkdir -p "dist/${name}"
+          install -m 0755 target/aarch64-apple-darwin/release/concerto "dist/${name}/concerto"
+          cp LICENSE-MIT LICENSE-APACHE README.md "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+          ( cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-archive
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true              # operator reviews and publishes manually
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          fail_on_unmatched_files: true
