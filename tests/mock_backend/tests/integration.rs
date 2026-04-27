@@ -36,6 +36,7 @@ fn test_args() -> Args {
         host: "127.0.0.1".to_string(),
         startup_delay_secs: 0,
         response_latency_ms: 0,
+        stream_chunk_delay_ms: 2,
         fail_probability: 0.0,
         crash_after: None,
     }

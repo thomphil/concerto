@@ -58,11 +58,11 @@ fn sort_by_eviction_priority(candidates: &mut [&LoadedModel], policy: EvictionPo
     match policy {
         EvictionPolicy::Lru => {
             // Oldest last_request_at first (most stale → evict first)
-            candidates.sort_by(|a, b| a.last_request_at.cmp(&b.last_request_at));
+            candidates.sort_by_key(|a| a.last_request_at);
         }
         EvictionPolicy::Lfu => {
             // Fewest requests first
-            candidates.sort_by(|a, b| a.request_count.cmp(&b.request_count));
+            candidates.sort_by_key(|a| a.request_count);
         }
         EvictionPolicy::SizeWeightedLru => {
             // Score = staleness * size (prefer evicting large stale models)

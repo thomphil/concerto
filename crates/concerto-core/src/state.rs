@@ -42,7 +42,7 @@ impl ClusterState {
             .iter()
             .filter(|g| g.health != GpuHealth::Unhealthy)
             .collect();
-        gpus.sort_by(|a, b| b.memory_available.cmp(&a.memory_available));
+        gpus.sort_by_key(|g| std::cmp::Reverse(g.memory_available));
         gpus
     }
 

@@ -40,9 +40,18 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub startup_delay_secs: u64,
 
-    /// Artificial latency added to each response, in milliseconds.
+    /// Artificial latency added before the response is produced, in
+    /// milliseconds. For streaming requests this delays the response
+    /// *headers* (and therefore time-to-first-byte); for non-streaming
+    /// requests it delays the entire response.
     #[arg(long, default_value_t = 10)]
     pub response_latency_ms: u64,
+
+    /// Per-chunk delay applied to streaming responses (ms between SSE
+    /// events). Lets a test exercise long-running streaming bodies that
+    /// outlive `request_timeout_secs` without delaying headers.
+    #[arg(long, default_value_t = 2)]
+    pub stream_chunk_delay_ms: u64,
 
     /// Probability of returning a 500 error for a given request (0.0 - 1.0).
     #[arg(long, default_value_t = 0.0)]
@@ -58,6 +67,7 @@ pub struct Args {
 pub struct AppState {
     pub request_counter: Arc<AtomicUsize>,
     pub response_latency_ms: u64,
+    pub stream_chunk_delay_ms: u64,
     pub fail_probability: f64,
     pub crash_after: Option<usize>,
 }
@@ -67,6 +77,7 @@ impl AppState {
         Self {
             request_counter: Arc::new(AtomicUsize::new(0)),
             response_latency_ms: args.response_latency_ms,
+            stream_chunk_delay_ms: args.stream_chunk_delay_ms,
             fail_probability: args.fail_probability,
             crash_after: args.crash_after,
         }
@@ -176,7 +187,7 @@ async fn chat_completions(
     }
 
     if payload.stream {
-        Ok(streaming_response(payload.model).into_response())
+        Ok(streaming_response(payload.model, state.stream_chunk_delay_ms).into_response())
     } else {
         Ok(Json(canned_chat_response(&payload.model)).into_response())
     }
@@ -185,12 +196,14 @@ async fn chat_completions(
 /// Build an SSE response containing the canned streaming chunks plus `[DONE]`.
 fn streaming_response(
     model: String,
+    chunk_delay_ms: u64,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let stream = async_stream::stream! {
         for chunk in streaming_chunks(&model) {
             yield Ok(Event::default().data(chunk));
-            // Small delay between chunks so clients see distinct events.
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            // Per-chunk delay (default 2ms) so clients see distinct events;
+            // tests can crank this up to exercise long-running bodies.
+            tokio::time::sleep(Duration::from_millis(chunk_delay_ms)).await;
         }
         yield Ok(Event::default().data("[DONE]"));
     };
