@@ -81,6 +81,105 @@ Verify the new range is clean with `ss -tln | awk '{print $4}' | grep -oP ':\K\d
 
 **Fix:** pin the model with `pin = true` in its `[[models]]` entry if it sits on a hot streaming path. Increase `eviction_grace_period_secs` if normal stream duration regularly exceeds 30 seconds. As a diagnostic, the `/status` endpoint will show `stopped_count` climbing under eviction pressure.
 
+## vLLM eats all my GPU memory and won't share with a second model
+
+**Symptom:** A second model fails to load on a GPU that, by `vram_required` arithmetic, should have plenty of room. `nvidia-smi` shows the first model's vLLM process consuming 90%+ of total VRAM. Concerto refuses to schedule the second model and rejects the request with `backend_unavailable`.
+
+**Cause:** vLLM defaults to `--gpu-memory-utilization=0.90`, which reserves 90% of the GPU's total VRAM for that single instance regardless of the model's actual weight footprint. The reservation includes a generously-sized KV cache that vLLM grows aggressively. Concerto's `vram_required` accounting is correct for the weights, but vLLM is not honouring it.
+
+**Fix:** override the default per model in `concerto.toml` so each instance reserves only its share of the GPU:
+
+```toml
+[[models]]
+id = "qwen2.5-0.5b"
+name = "Qwen 2.5 0.5B"
+weight_path = "/srv/models/qwen2.5-0.5b"
+vram_required = "2GB"
+engine = "VLLM"
+engine_args = ["--gpu-memory-utilization", "0.5"]
+```
+
+Pick a fraction that divides the GPU between the models you intend to co-locate (`0.5` for two equal-sized models, `0.3` for three, etc.). Sprint 3 §A.6 (optional) may promote this to a first-class `max_vram_fraction` field so Concerto can compute the flag itself.
+
+## I SIGKILL'd Concerto and now there's a python process holding GPU memory
+
+**Symptom:** `concerto` exited via SIGKILL (OOM killer, `kill -9`, panic, hard reboot interrupted). On restart, Concerto either fails to bind a backend port or schedules a model and immediately runs out of VRAM. `nvidia-smi` lists a `python` or `vllm` process you didn't start.
+
+**Cause:** SIGKILL doesn't run any cleanup. Backend processes spawned by Concerto were left running with their VRAM reservations intact. Sprint 3 §A.1 (process-group kill) prevents this on graceful shutdown, but cannot help when the parent dies without a chance to signal anyone — the orphans are now reparented to PID 1.
+
+**Fix:** Sprint 3 §A.3 startup reconcile catches this on next start and reaps anything bound inside Concerto's port range before scheduling new backends. In the meantime, manual recovery:
+
+```sh
+nvidia-smi                 # find the orphan PID(s) under "Processes"
+pkill -f vllm              # or kill -9 <pid> for non-vLLM engines
+nvidia-smi                 # verify VRAM has been released
+systemctl start concerto   # or however you launch it
+```
+
+If `pkill -f vllm` is too broad for your host (e.g. you also run vLLM standalone), match on the `--port` flag Concerto allocated from `port_range_start..port_range_end`.
+
+## First request after a model goes idle takes 30–90s
+
+**Symptom:** A request to a model that hasn't been used recently hangs for tens of seconds before tokens start arriving. Subsequent requests to the same model are fast.
+
+**Cause:** Concerto unloads idle models to free VRAM for other tenants. The first request after that triggers a full inference-engine cold start: process spawn, weight load from disk, CUDA kernel warmup, KV cache allocation. See [`benchmarks.md`](benchmarks.md#cold-start-latencies) for measured numbers on a 2× RTX A4000 (27–34s for 0.5B–7B models; bigger models take proportionally longer).
+
+This is expected. ROADMAP §11 R3 captures the three-layer mitigation:
+
+1. **User self-selection.** The README's [Good fit / bad fit](../README.md#good-fit--bad-fit) section is explicit that Concerto is for steady-state multi-tenant routing on a single node, not zero-cold-start serverless.
+2. **Pin hot models** with `pin = true` per model in `concerto.toml` so they're never evicted. Pinned models stay resident across the eviction policy's lifetime.
+3. **Warm pool** in v0.2 — keeping a configurable set of models pre-loaded even when idle, paying the VRAM cost in exchange for cold-start avoidance.
+
+**Fix:** decide which models warrant `pin = true`:
+
+```toml
+[[models]]
+id = "primary-chat"
+name = "Primary chat model"
+weight_path = "/srv/models/qwen2.5-7b"
+vram_required = "17GB"
+engine = "VLLM"
+pin = true
+```
+
+If pinning isn't an option (e.g. you need more total models than fit at once), accept the cold-start cost or wait for v0.2.
+
+## Streaming completion stopped mid-tokens during shutdown
+
+**Symptom:** A streaming chat completion was in flight when Concerto received SIGTERM, and the client received a truncated SSE stream — partial JSON in the last `data:` chunk, no `data: [DONE]` terminator, connection closed.
+
+**Cause:** Pre-Sprint-3 versions stopped backends without coordinating with the proxy, so any in-flight stream was killed at the TCP layer. Sprint 3 §A.2 ([PR #16](https://github.com/thomphil/concerto/pull/16)) introduced a shutdown-aware proxy that, on receiving the shutdown signal, stops forwarding upstream chunks, emits a final `data: [DONE]` event, and closes the response body cleanly so OpenAI-compatible clients see a well-formed end-of-stream.
+
+**Fix:** upgrade to a Concerto build that includes PR #16 (post-Sprint-3 §A.2). If you observe this on a build that already has §A.2, capture the truncated response, the corresponding server log lines, and your `concerto --version`, and open an issue at <https://github.com/thomphil/concerto/issues>.
+
+## `/metrics` endpoint returns nothing for `concerto_active_backends` before any request lands
+
+**Symptom:** Immediately after launch, scraping `/metrics` shows scheduling-related gauges (`concerto_active_backends`, etc.) absent or with no samples. Prometheus alerts on "no data" rather than reporting zero.
+
+**Cause:** Expected. Concerto's metrics facade follows the standard Prometheus client convention: gauges are not emitted until they are first set. `concerto_active_backends` is set whenever the orchestrator updates the active-backend tally, which doesn't happen until a request triggers scheduling. Counters and histograms behave the same way — they only appear in scrape output once they have been incremented or observed at least once.
+
+**Fix:** none required. Issue any chat completion request to populate the gauges. If you need a "no data = zero" semantic for alerting, configure your Prometheus alerting rules to use `absent()` and treat absence as zero, or set up a synthetic warm-up request in your deployment script.
+
+## `request_timeout_secs` doesn't apply to streaming
+
+**Symptom:** A streaming chat completion runs for many minutes despite `request_timeout_secs = 60` being set in `[routing]`. The middleware appears to be off.
+
+**Cause:** Sprint 3 §A.4 design decision ([PR #15](https://github.com/thomphil/concerto/pull/15)). The timeout middleware bounds the *response future* — the time until the handler returns a response — not the lifetime of the response body. Streaming handlers construct an SSE body quickly and hand it back to axum; from that point the body is streamed by the framework with the middleware already out of the picture. The bound effectively becomes a time-to-first-byte limit for streamed responses.
+
+This is intentional: bounding body lifetime would require killing live streams from the middleware layer, which conflicts with the streaming-during-shutdown contract documented above and with cooperative eviction.
+
+**Fix:** if you need a hard wall-clock cap on streamed responses, terminate from the client side — most OpenAI-compatible client libraries accept a `timeout` or use an HTTP client with a configurable read deadline. For non-streaming completions, `request_timeout_secs` works as you'd expect.
+
+## Backend process orphans after Concerto crash
+
+**Symptom:** Concerto died unexpectedly (panic, SIGSEGV, OOM kill). After the parent exited, `pgrep -f vllm` (or your engine's name) still lists processes, and `nvidia-smi` still shows VRAM consumed.
+
+**Cause:** Pre-Sprint-3 versions spawned each backend in the same process group as the parent and relied on per-`Child` kill signalling. A parent that dies before sending those signals leaves the children orphaned and reparented to PID 1.
+
+**Fix:** Sprint 3 §A.1 (process-group kill — branch `sprint-3/a1-process-group-kill`) makes each backend its own process-group leader via `setsid`-style spawning, so Concerto signals the entire group with one syscall. Combined with `KillMode=control-group` under systemd (see [`deployment.md`](deployment.md)), a SIGKILL on the Concerto unit reaps the whole tree atomically. After §A.3 startup reconcile lands, even an unclean death is recovered automatically on the next start.
+
+If you observe orphans on a build that has §A.1 and §A.3, the orphan is almost certainly a backend started by something other than Concerto — a leftover `vllm serve ...` from manual testing, a competing supervisor, or a stale Docker container. Cross-reference the orphan PID's `--port` flag against `port_range_start..port_range_end` to confirm before reaching for the issue tracker. See also the [Orchestrator State Machine](architecture.md#orchestrator-state-machine) section for the broader invariants Concerto enforces around backend lifecycle.
+
 ---
 
 **Found an issue not covered here?** Open an issue at
