@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -71,6 +72,7 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Notify::new()),
+        in_flight: Arc::new(AtomicUsize::new(0)),
         prometheus,
     };
 

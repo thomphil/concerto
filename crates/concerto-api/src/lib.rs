@@ -20,6 +20,6 @@ pub mod server;
 pub mod shutdown;
 pub mod types;
 
-pub use app::{AppState, LoadResult};
+pub use app::{AppState, InFlightGuard, LoadResult};
 pub use error::ApiError;
 pub use server::serve;
