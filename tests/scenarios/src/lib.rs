@@ -24,7 +24,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytesize::ByteSize;
+use concerto_api::state_file::StateRecorder;
 use concerto_api::{serve, AppState};
 use concerto_backend::{
     BackendError, BackendHandle, BackendManager, PortAllocator, ProcessBackendManager,
@@ -57,6 +59,17 @@ fn mock_backend_binary() -> PathBuf {
         candidate.display()
     );
     candidate
+}
+
+/// No-op [`StateRecorder`] for scenarios — keeps the production recorder's
+/// home-directory file from being touched by tests.
+struct NoopStateRecorder;
+
+#[async_trait]
+impl StateRecorder for NoopStateRecorder {
+    async fn record_launch(&self, _handle: &concerto_backend::BackendHandle) {}
+    async fn record_stop(&self, _handle: &concerto_backend::BackendHandle) {}
+    async fn clear(&self) {}
 }
 
 /// Hands out a unique 100-port range to every scenario harness so parallel
@@ -374,6 +387,11 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
     // multiple harnesses in parallel within a single test binary; the
     // install function is idempotent and returns a shared handle.
     let prometheus = concerto_api::metrics::install().expect("installing Prometheus recorder");
+    // Scenarios use a no-op state recorder — they don't need to persist
+    // anything across runs and the production recorder writes to
+    // `~/.local/share/concerto/state.json`, which would create
+    // cross-test interference.
+    let state_recorder: Arc<dyn StateRecorder> = Arc::new(NoopStateRecorder);
     let state = AppState {
         cluster: Arc::new(Mutex::new(cluster)),
         gpu: gpu.clone() as Arc<dyn GpuMonitor>,
@@ -382,6 +400,7 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: shutdown.clone(),
+        state_recorder,
         prometheus,
     };
 

@@ -10,6 +10,8 @@ use concerto_gpu::GpuMonitor;
 use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::sync::{broadcast, Mutex, Notify};
 
+use crate::state_file::StateRecorder;
+
 /// Outcome of a single model-load operation, broadcast to every waiter.
 ///
 /// When a cold-start is in progress, concurrent requests for the same model
@@ -50,6 +52,11 @@ pub struct AppState {
     pub backends: Arc<Mutex<HashMap<ModelId, BackendHandle>>>,
     /// Notifier used to signal graceful shutdown to background tasks.
     pub shutdown: Arc<Notify>,
+    /// Persists the set of currently-running backends to disk so a
+    /// startup reconcile after a Concerto crash can clean them up.
+    /// See [`crate::state_file`]. The graceful shutdown path calls
+    /// `clear()` so a clean exit leaves the file empty.
+    pub state_recorder: Arc<dyn StateRecorder>,
     /// Prometheus handle used by the `/metrics` endpoint to render the
     /// current metric snapshot. Installed once per process via
     /// [`crate::metrics::install`]; cloned cheaply into every [`AppState`].

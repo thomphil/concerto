@@ -21,6 +21,13 @@ concerto-core = { workspace = true }
 concerto-gpu = { workspace = true }
 concerto-backend = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }
+tempfile = "3"
+
 [features]
 # Enable real NVML-backed GPU telemetry. Forwards to `concerto-gpu/nvml`,
 # which itself gates its NVML bindings on `target_os = "linux"` — so

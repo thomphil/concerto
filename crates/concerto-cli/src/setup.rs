@@ -7,6 +7,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use bytesize::ByteSize;
 use concerto_api::metrics as api_metrics;
+use concerto_api::state_file::{
+    default_state_file_path, JsonStateRecorder, RecordingBackendManager, StateRecorder,
+};
 use concerto_api::AppState;
 use concerto_backend::{BackendManager, PortAllocator, ProcessBackendManager};
 use concerto_config::ConcertoConfig;
@@ -51,8 +54,20 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
     }
 
     let gpu: Arc<dyn GpuMonitor> = build_gpu_monitor(args).await?;
-    let backend: Arc<dyn BackendManager> = Arc::new(ProcessBackendManager::with_port_allocator(
-        PortAllocator::with_range(config.routing.port_range_start..config.routing.port_range_end),
+    let inner_backend: Arc<dyn BackendManager> = Arc::new(
+        ProcessBackendManager::with_port_allocator(PortAllocator::with_range(
+            config.routing.port_range_start..config.routing.port_range_end,
+        )),
+    );
+
+    // Sprint 3 §A.3: every launch / stop is recorded to a state file
+    // so a startup reconcile after a Concerto crash can clean up.
+    let state_path = default_state_file_path()
+        .context("resolving state-file path for the recording backend manager")?;
+    let state_recorder: Arc<dyn StateRecorder> = Arc::new(JsonStateRecorder::new(state_path));
+    let backend: Arc<dyn BackendManager> = Arc::new(RecordingBackendManager::new(
+        inner_backend,
+        state_recorder.clone(),
     ));
     let config = Arc::new(config);
 
@@ -71,6 +86,7 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
         loading: Arc::new(Mutex::new(HashMap::new())),
         backends: Arc::new(Mutex::new(HashMap::new())),
         shutdown: Arc::new(Notify::new()),
+        state_recorder,
         prometheus,
     };
 

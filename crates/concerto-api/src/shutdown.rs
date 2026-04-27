@@ -38,5 +38,9 @@ pub async fn graceful_shutdown(state: AppState) {
             warn!(%model_id, error = %e, "backend stop returned error during shutdown");
         }
     }
+    // Truncate the state file so the next start sees no orphans.
+    // Sprint 3 §A.3.
+    state.state_recorder.clear().await;
+
     info!("graceful shutdown complete");
 }

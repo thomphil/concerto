@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+tempfile = "3"
 chrono = { workspace = true }
 bytesize = { workspace = true }
 futures = "0.3"
