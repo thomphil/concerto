@@ -76,8 +76,16 @@ FROM debian:bookworm-slim AS runtime
 #
 # Clean apt lists and the temporary non-free source in the
 # same layer to keep the image small.
+#
+# bookworm-slim ships a Deb822-format sources file at
+# /etc/apt/sources.list.d/debian.sources with an explicit
+# Signed-By pointing at the keyring; adding a legacy .list
+# file *without* Signed-By for the same repo URL trips
+# apt's "Conflicting values set for option Signed-By"
+# guard. We replicate the keyring path explicitly on the
+# legacy line so apt sees a single, consistent config.
 RUN set -eux; \
-    echo "deb http://deb.debian.org/debian bookworm non-free" \
+    echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bookworm non-free" \
         > /etc/apt/sources.list.d/non-free.list; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
