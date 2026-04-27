@@ -54,9 +54,16 @@ pub async fn build_app_state(args: &Cli) -> Result<(AppState, SocketAddr)> {
     }
 
     let gpu: Arc<dyn GpuMonitor> = build_gpu_monitor(args).await?;
+
+    // Sprint 3 §A.1: SIGTERM-then-SIGKILL grace is wired from
+    // routing.eviction_grace_period_secs so the backend's
+    // process-group kill matches the eviction policy.
     let inner_backend: Arc<dyn BackendManager> = Arc::new(
         ProcessBackendManager::with_port_allocator(PortAllocator::with_range(
             config.routing.port_range_start..config.routing.port_range_end,
+        ))
+        .with_termination_grace(std::time::Duration::from_secs(
+            config.routing.eviction_grace_period_secs,
         )),
     );
 

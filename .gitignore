@@ -9,6 +9,9 @@
 *.swp
 *.swo
 
+# Claude Code agent worktrees (created on demand, not part of the repo)
+.claude/worktrees/
+
 # OS
 .DS_Store
 Thumbs.db

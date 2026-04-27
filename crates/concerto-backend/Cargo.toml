@@ -14,6 +14,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 bytesize = { workspace = true }
 tokio = { workspace = true }
