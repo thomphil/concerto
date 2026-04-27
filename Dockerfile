@@ -63,36 +63,34 @@ FROM debian:bookworm-slim AS runtime
 # Runtime dependencies:
 # - libssl3:         reqwest's default native-tls backend
 # - ca-certificates: TLS root store for outbound HTTPS
-# - libnvidia-ml1:   NVML stub, dlopen'd by nvml-wrapper when
-#                    the `nvml` feature is enabled at runtime.
-#                    Lives in Debian's `non-free` component, so
-#                    we enable it just for this install and
-#                    drop the source list afterwards. In
-#                    production the NVIDIA Container Toolkit
-#                    typically bind-mounts a matching libnvidia-ml
-#                    from the host driver over this stub; the
-#                    stub keeps the binary loadable without GPU
-#                    in CI / smoke tests.
 #
-# Clean apt lists and the temporary non-free source in the
-# same layer to keep the image small.
+# We deliberately do NOT install libnvidia-ml1 from Debian's
+# non-free component. Two reasons:
 #
-# bookworm-slim ships a Deb822-format sources file at
-# /etc/apt/sources.list.d/debian.sources with an explicit
-# Signed-By pointing at the keyring; adding a legacy .list
-# file *without* Signed-By for the same repo URL trips
-# apt's "Conflicting values set for option Signed-By"
-# guard. We replicate the keyring path explicitly on the
-# legacy line so apt sees a single, consistent config.
+# 1. The Debian package pulls in `nvidia-alternative` →
+#    `glx-alternative-nvidia` → graphics-stack transitive
+#    deps that aren't in bookworm-slim and would blow the
+#    50 MB image budget many times over.
+# 2. In production every Concerto image runs with
+#    `--gpus all` (or the docker-compose equivalent), which
+#    activates the NVIDIA Container Toolkit. The toolkit
+#    bind-mounts the *host* driver's libnvidia-ml.so.1 into
+#    /usr/lib/x86_64-linux-gnu/ inside the container. That
+#    file is what `nvml-wrapper` dlopens, and using the host
+#    lib guarantees the version matches the host kernel
+#    driver — which a stub package from Debian non-free
+#    cannot.
+#
+# Without `--gpus all`, the binary still runs perfectly
+# under `--mock-gpus N` (dev / CI smoke tests). NVML
+# initialisation only fires when the operator opts in via
+# the absence of `--mock-gpus`, at which point the host
+# driver libs MUST be present anyway.
 RUN set -eux; \
-    echo "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bookworm non-free" \
-        > /etc/apt/sources.list.d/non-free.list; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         libssl3 \
-        ca-certificates \
-        libnvidia-ml1; \
-    rm -f /etc/apt/sources.list.d/non-free.list; \
+        ca-certificates; \
     rm -rf /var/lib/apt/lists/*
 
 # Non-root user with a stable UID. 65532 mirrors the
