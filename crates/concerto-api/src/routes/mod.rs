@@ -9,22 +9,31 @@ pub mod status;
 use axum::routing::{get, post};
 use axum::Router;
 
+use crate::middleware::request_timeout;
 use crate::AppState;
 
 /// Build the axum router with every route mounted and state attached.
 ///
-/// Middleware layers (tracing, CORS, optional timeout, future auth/rate-limit
-/// seam for open-core extensions per ROADMAP §6.4) are installed in
-/// [`crate::server::serve`] — keeping them there means this function stays
-/// plain enough to use directly from integration tests that want to serve
-/// the router without the full serve loop.
+/// Cross-cutting middleware (tracing, CORS, future auth/rate-limit seam for
+/// open-core extensions per ROADMAP §6.4) is installed in
+/// [`crate::server::serve`]. Per-route middleware that depends on shared
+/// state — currently the [`request_timeout`] layer applied to chat
+/// completions — is wired in here so the merged sub-router stays the unit
+/// of test against `routes::router(state)`.
 pub fn router(state: AppState) -> Router {
+    let chat_routes = Router::new()
+        .route("/v1/chat/completions", post(chat::completions))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            request_timeout,
+        ));
+
     Router::new()
         .route("/health", get(health::liveness))
         .route("/ready", get(health::readiness))
         .route("/status", get(status::status))
         .route("/metrics", get(metrics::scrape))
         .route("/v1/models", get(models::list))
-        .route("/v1/chat/completions", post(chat::completions))
+        .merge(chat_routes)
         .with_state(state)
 }

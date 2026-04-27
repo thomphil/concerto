@@ -35,6 +35,9 @@ pub enum ApiError {
     #[error("timed out waiting for model '{0}' to become ready")]
     LoadTimeout(ModelId),
 
+    #[error("request exceeded configured request_timeout_secs")]
+    RequestTimeout,
+
     #[error("backend crashed: {0}")]
     BackendCrashed(String),
 
@@ -74,6 +77,7 @@ impl ApiError {
             ApiError::ModelNotFound(_) => "model_not_found",
             ApiError::AllGpusUnhealthy => "all_gpus_unhealthy",
             ApiError::LoadTimeout(_) => "load_timeout",
+            ApiError::RequestTimeout => "request_timeout",
             ApiError::BackendCrashed(_) => "backend_crashed",
             ApiError::BackendUnavailable(_) => "backend_unavailable",
             ApiError::BadRequest(_) => "bad_request",
@@ -92,6 +96,7 @@ impl ApiError {
             ApiError::ModelNotFound(_) => StatusCode::NOT_FOUND,
             ApiError::AllGpusUnhealthy => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::LoadTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            ApiError::RequestTimeout => StatusCode::GATEWAY_TIMEOUT,
             ApiError::BackendCrashed(_) => StatusCode::BAD_GATEWAY,
             ApiError::BackendUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::BadRequest(_) | ApiError::Json(_) => StatusCode::BAD_REQUEST,

@@ -135,6 +135,14 @@ pub struct ModelMockArgs {
     /// Add `--crash-after <n>` so the backend exits after handling N
     /// chat-completion requests. Used by the crash-recovery scenario.
     pub crash_after: Option<usize>,
+    /// Override `--response-latency-ms <n>` (default 10ms). Used by the
+    /// request-timeout scenario to make a chat completion take longer than
+    /// `request_timeout_secs`.
+    pub response_latency_ms: Option<u64>,
+    /// Override `--stream-chunk-delay-ms <n>` (default 2ms). Used by the
+    /// streaming-exemption scenario to make the SSE body outlive
+    /// `request_timeout_secs` without delaying response headers.
+    pub stream_chunk_delay_ms: Option<u64>,
 }
 
 /// Configuration for a scenario server.
@@ -147,6 +155,10 @@ pub struct ScenarioConfig {
     /// Override the default health-check loop interval (10s is far too slow
     /// for tests; scenarios usually want something on the order of 200ms).
     pub health_check_interval_secs: u64,
+    /// Override `routing.request_timeout_secs`. Default `0` (disabled),
+    /// matching production. Set to a small positive value to exercise the
+    /// per-request timeout middleware.
+    pub request_timeout_secs: u64,
 }
 
 impl ScenarioConfig {
@@ -156,6 +168,7 @@ impl ScenarioConfig {
             memory_per_gpu_gb,
             models: vec![],
             health_check_interval_secs: 1,
+            request_timeout_secs: 0,
         }
     }
 
@@ -167,6 +180,11 @@ impl ScenarioConfig {
 
     pub fn with_model_args(mut self, id: &str, vram_gb: u64, args: ModelMockArgs) -> Self {
         self.models.push((id.into(), vram_gb, args));
+        self
+    }
+
+    pub fn with_request_timeout_secs(mut self, secs: u64) -> Self {
+        self.request_timeout_secs = secs;
         self
     }
 }
@@ -265,6 +283,14 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
                 args.push("--crash-after".to_string());
                 args.push(crash_after.to_string());
             }
+            if let Some(latency_ms) = mock_args.response_latency_ms {
+                args.push("--response-latency-ms".to_string());
+                args.push(latency_ms.to_string());
+            }
+            if let Some(chunk_delay_ms) = mock_args.stream_chunk_delay_ms {
+                args.push("--stream-chunk-delay-ms".to_string());
+                args.push(chunk_delay_ms.to_string());
+            }
             ModelConfigEntry {
                 id: id.clone(),
                 name: id.clone(),
@@ -297,6 +323,7 @@ pub async fn spawn_scenario(cfg: ScenarioConfig) -> ServerHandle {
         port_range_start: port_range.start,
         port_range_end: port_range.end,
         cold_start_timeout_secs: 15, // keep tests fast when a spawn is wrong
+        request_timeout_secs: cfg.request_timeout_secs,
         ..RoutingSection::default()
     };
 

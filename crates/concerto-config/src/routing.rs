@@ -51,9 +51,12 @@ pub struct RoutingSection {
     #[serde(default = "default_port_range_end")]
     pub port_range_end: u16,
 
-    /// Per-request timeout applied as an axum middleware. `0` disables the
-    /// timeout (intended default for v0.1 — the TimeoutLayer ships with
-    /// Sprint 3, the config field is here so users can prepare).
+    /// Per-request timeout (in seconds) applied as an axum middleware to
+    /// `POST /v1/chat/completions`. `0` (the default) disables enforcement.
+    /// The middleware bounds the *response future* — the time until the
+    /// handler returns — so streaming responses are exempt by construction
+    /// (the handler resolves quickly with a streaming body, only the
+    /// time-to-first-byte is bounded). See `docs/troubleshooting.md`.
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
 }
