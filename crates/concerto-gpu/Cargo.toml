@@ -2,6 +2,8 @@
 name = "concerto-gpu"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "GPU monitoring abstractions for Concerto: GpuMonitor trait, mock implementation, and optional NVML-backed implementation."
 
 [dependencies]

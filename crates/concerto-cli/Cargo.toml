@@ -2,6 +2,9 @@
 name = "concerto-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Concerto CLI: a Rust inference multiplexer for self-hosted LLMs. Orchestrates vLLM, llama.cpp, and SGLang processes across 1-8 GPUs with demand-aware routing."
 
 [[bin]]
 name = "concerto"

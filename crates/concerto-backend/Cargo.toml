@@ -2,6 +2,8 @@
 name = "concerto-backend"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Backend process lifecycle for Concerto: BackendManager trait, mock implementation, and a real process-spawning implementation for inference engines."
 
 [dependencies]
