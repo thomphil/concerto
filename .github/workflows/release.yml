@@ -94,10 +94,11 @@ jobs:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifacts
+      - name: Download archives
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: '*-archive'
           merge-multiple: true
 
       - name: Create draft release
