@@ -35,6 +35,17 @@ pub struct ModelConfigEntry {
     /// with a clear reason instead.
     #[serde(default)]
     pub pin: bool,
+
+    /// Per-model VRAM budget as a fraction of the GPU's total memory, in the
+    /// open range `(0.0, 1.0]`.
+    ///
+    /// **vLLM-specific.** Translated to `--gpu-memory-utilization <x>` when
+    /// the engine is `vllm`. Silently ignored on other engines (with a
+    /// load-time warning). If `engine_args` already specifies
+    /// `--gpu-memory-utilization`, the explicit value wins and a warning is
+    /// logged at config load.
+    #[serde(default)]
+    pub max_vram_fraction: Option<f64>,
 }
 
 impl From<&ModelConfigEntry> for ModelSpec {
@@ -47,6 +58,7 @@ impl From<&ModelConfigEntry> for ModelSpec {
             engine: entry.engine.clone(),
             engine_args: entry.engine_args.clone(),
             pin: entry.pin,
+            max_vram_fraction: entry.max_vram_fraction,
         }
     }
 }

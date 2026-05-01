@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use concerto_core::{ModelId, ModelSpec, RoutingConfig};
+use concerto_core::{EngineType, ModelId, ModelSpec, RoutingConfig};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::ConfigError;
 use crate::gpus::GpuConfigEntry;
@@ -68,6 +68,38 @@ impl ConcertoConfig {
             if !seen_models.insert(model.id.as_str()) {
                 return Err(ConfigError::DuplicateModelId(model.id.clone()));
             }
+
+            if let Some(value) = model.max_vram_fraction {
+                // Reject NaN, non-positive, and >1.0. A 0% budget is meaningless
+                // and almost certainly a typo, so we flag it just like a negative.
+                if value.is_nan() || !(value > 0.0 && value <= 1.0) {
+                    return Err(ConfigError::InvalidVramFraction {
+                        model: model.id.clone(),
+                        value,
+                    });
+                }
+
+                // Warn — but don't error — when the field is set on a non-vLLM
+                // engine. The launcher silently ignores it; the warning makes
+                // the misconfiguration visible.
+                if !matches!(model.engine, EngineType::Vllm) {
+                    warn!(
+                        model = %model.id,
+                        engine = ?model.engine,
+                        "max_vram_fraction is vLLM-specific and will be ignored on engine={:?}",
+                        model.engine,
+                    );
+                }
+
+                // Warn when engine_args already specifies the flag; the
+                // explicit engine_args entry wins.
+                if engine_args_specifies_gpu_memory_utilization(&model.engine_args) {
+                    warn!(
+                        model = %model.id,
+                        "ignoring max_vram_fraction because engine_args already specifies --gpu-memory-utilization",
+                    );
+                }
+            }
         }
 
         let mut seen_gpus = HashSet::with_capacity(self.gpus.len());
@@ -107,4 +139,14 @@ impl ConcertoConfig {
             vram_headroom: self.routing.vram_headroom,
         }
     }
+}
+
+/// Returns true iff `engine_args` already contains the
+/// `--gpu-memory-utilization` flag (in any position).
+///
+/// Shared between config-load validation (where it triggers a warning) and
+/// the backend command builder (where it suppresses auto-injection).
+pub(crate) fn engine_args_specifies_gpu_memory_utilization(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--gpu-memory-utilization" || a.starts_with("--gpu-memory-utilization="))
 }

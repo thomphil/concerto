@@ -167,6 +167,7 @@ pub mod test_helpers {
             engine: EngineType::Mock,
             engine_args: vec![],
             pin: false,
+            max_vram_fraction: None,
         };
         (model_id, spec)
     }

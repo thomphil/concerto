@@ -73,6 +73,7 @@ fn make_model_spec(id: &str, vram_gb: u64) -> (ModelId, ModelSpec) {
         engine: EngineType::Mock,
         engine_args: vec![],
         pin: false,
+        max_vram_fraction: None,
     };
     (model_id, spec)
 }

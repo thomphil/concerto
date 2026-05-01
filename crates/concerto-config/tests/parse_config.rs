@@ -372,6 +372,191 @@ fn parses_custom_engine_variant() {
 }
 
 #[test]
+fn valid_max_vram_fraction_parses_and_propagates_to_model_spec() {
+    let toml = r#"
+        [[models]]
+        id = "qwen-shared"
+        name = "Qwen shared"
+        weight_path = "/models/qwen"
+        vram_required = "2 GB"
+        engine = "vllm"
+        max_vram_fraction = 0.5
+
+        [[gpus]]
+        id = 0
+    "#;
+
+    let config = ConcertoConfig::from_toml_str(toml).expect("config should parse");
+    assert_eq!(config.models[0].max_vram_fraction, Some(0.5));
+
+    let registry = config.model_registry();
+    let spec = registry.get(&ModelId("qwen-shared".into())).unwrap();
+    assert_eq!(spec.max_vram_fraction, Some(0.5));
+}
+
+#[test]
+fn missing_max_vram_fraction_defaults_to_none() {
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "vllm"
+
+        [[gpus]]
+        id = 0
+    "#;
+
+    let config = ConcertoConfig::from_toml_str(toml).unwrap();
+    assert_eq!(config.models[0].max_vram_fraction, None);
+}
+
+#[test]
+fn out_of_range_max_vram_fraction_is_rejected() {
+    for bad in [-0.1_f64, 1.1_f64, 2.0_f64] {
+        let toml = format!(
+            r#"
+            [[models]]
+            id = "m"
+            name = "M"
+            weight_path = "/m"
+            vram_required = "1 GB"
+            engine = "vllm"
+            max_vram_fraction = {bad}
+
+            [[gpus]]
+            id = 0
+            "#
+        );
+        let err =
+            ConcertoConfig::from_toml_str(&toml).expect_err(&format!("{bad} must be rejected"));
+        match err {
+            ConfigError::InvalidVramFraction { model, value } => {
+                assert_eq!(model, "m");
+                assert!((value - bad).abs() < f64::EPSILON);
+            }
+            other => panic!("expected InvalidVramFraction for {bad}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn nan_max_vram_fraction_is_rejected() {
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "vllm"
+        max_vram_fraction = nan
+
+        [[gpus]]
+        id = 0
+    "#;
+    let err = ConcertoConfig::from_toml_str(toml).unwrap_err();
+    match err {
+        ConfigError::InvalidVramFraction { model, value } => {
+            assert_eq!(model, "m");
+            assert!(value.is_nan());
+        }
+        other => panic!("expected InvalidVramFraction, got {other:?}"),
+    }
+}
+
+#[test]
+fn zero_max_vram_fraction_is_rejected() {
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "vllm"
+        max_vram_fraction = 0.0
+
+        [[gpus]]
+        id = 0
+    "#;
+    let err = ConcertoConfig::from_toml_str(toml).unwrap_err();
+    match err {
+        ConfigError::InvalidVramFraction { model, value } => {
+            assert_eq!(model, "m");
+            assert_eq!(value, 0.0);
+        }
+        other => panic!("expected InvalidVramFraction, got {other:?}"),
+    }
+}
+
+#[test]
+fn upper_bound_max_vram_fraction_is_accepted() {
+    // Closed upper bound: 1.0 means "the whole GPU" and is legitimate.
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "vllm"
+        max_vram_fraction = 1.0
+
+        [[gpus]]
+        id = 0
+    "#;
+    let config = ConcertoConfig::from_toml_str(toml).expect("1.0 must parse");
+    assert_eq!(config.models[0].max_vram_fraction, Some(1.0));
+}
+
+#[test]
+fn max_vram_fraction_with_explicit_engine_arg_still_validates() {
+    // When both are set, validation accepts the config (it's a config-load
+    // warning, not an error). The build_command tests verify that the
+    // explicit `engine_args` value wins over `max_vram_fraction`.
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "vllm"
+        engine_args = ["--gpu-memory-utilization", "0.7"]
+        max_vram_fraction = 0.5
+
+        [[gpus]]
+        id = 0
+    "#;
+    let config = ConcertoConfig::from_toml_str(toml).expect("both-set is a warning, not an error");
+    assert_eq!(config.models[0].max_vram_fraction, Some(0.5));
+    assert_eq!(
+        config.models[0].engine_args,
+        vec!["--gpu-memory-utilization", "0.7"]
+    );
+}
+
+#[test]
+fn max_vram_fraction_on_non_vllm_engine_validates_with_warning() {
+    // Setting the field on a non-vLLM engine logs a warning but does not
+    // reject the config — operators may set it consistently across engines
+    // in mixed deployments.
+    let toml = r#"
+        [[models]]
+        id = "m"
+        name = "M"
+        weight_path = "/m"
+        vram_required = "1 GB"
+        engine = "llamacpp"
+        max_vram_fraction = 0.5
+
+        [[gpus]]
+        id = 0
+    "#;
+    let config = ConcertoConfig::from_toml_str(toml).expect("non-vLLM engines must not error");
+    assert_eq!(config.models[0].max_vram_fraction, Some(0.5));
+    assert_eq!(config.models[0].engine, EngineType::LlamaCpp);
+}
+
+#[test]
 fn existing_string_engines_still_parse_after_custom_variant_added() {
     // Regression test — the addition of the Custom struct variant must not
     // break the bare-string form used for built-in engines.
