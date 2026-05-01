@@ -19,6 +19,24 @@ fn spec_with_engine(engine: EngineType, args: Vec<&str>) -> ModelSpec {
         engine,
         engine_args: args.into_iter().map(String::from).collect(),
         pin: false,
+        max_vram_fraction: None,
+    }
+}
+
+fn spec_with_engine_and_vram_fraction(
+    engine: EngineType,
+    args: Vec<&str>,
+    max_vram_fraction: Option<f64>,
+) -> ModelSpec {
+    ModelSpec {
+        id: ModelId::from("test-model"),
+        name: "Test Model".to_string(),
+        weight_path: "/models/test-model".to_string(),
+        vram_required: ByteSize::gb(8),
+        engine,
+        engine_args: args.into_iter().map(String::from).collect(),
+        pin: false,
+        max_vram_fraction,
     }
 }
 
@@ -181,6 +199,92 @@ fn custom_engine_substitutes_port_token() {
     let port_flags = args.iter().filter(|a| *a == "--port").count();
     assert_eq!(port_flags, 1, "expected exactly one --port flag");
     assert_eq!(env(&cmd, "CUDA_VISIBLE_DEVICES").as_deref(), Some("1"));
+}
+
+#[test]
+fn vllm_max_vram_fraction_injects_gpu_memory_utilization_flag() {
+    let spec = spec_with_engine_and_vram_fraction(
+        EngineType::Vllm,
+        vec!["--dtype", "bfloat16"],
+        Some(0.5),
+    );
+    let cmd = build_command(&spec, GpuId(0), 8123, None);
+    let args = args(&cmd);
+
+    let idx = args
+        .iter()
+        .position(|a| a == "--gpu-memory-utilization")
+        .expect("--gpu-memory-utilization should be present");
+    assert_eq!(args[idx + 1], "0.5");
+    // The auto-injected flag sits before user-supplied engine_args, which
+    // means an explicit override (next test) really does take precedence.
+    let dtype = args.iter().position(|a| a == "--dtype").unwrap();
+    assert!(idx < dtype, "auto-injected flag should precede engine_args");
+}
+
+#[test]
+fn vllm_explicit_engine_arg_wins_over_max_vram_fraction() {
+    // When both are set, build_command does NOT inject the flag — the user's
+    // explicit engine_args entry is the single source of truth.
+    let spec = spec_with_engine_and_vram_fraction(
+        EngineType::Vllm,
+        vec!["--gpu-memory-utilization", "0.7"],
+        Some(0.5),
+    );
+    let cmd = build_command(&spec, GpuId(0), 8123, None);
+    let args = args(&cmd);
+
+    let occurrences: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| (a == "--gpu-memory-utilization").then_some(i))
+        .collect();
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "exactly one --gpu-memory-utilization, got {args:?}"
+    );
+    assert_eq!(args[occurrences[0] + 1], "0.7");
+}
+
+#[test]
+fn vllm_explicit_eq_form_also_wins_over_max_vram_fraction() {
+    // The `--flag=value` form should also suppress auto-injection.
+    let spec = spec_with_engine_and_vram_fraction(
+        EngineType::Vllm,
+        vec!["--gpu-memory-utilization=0.7"],
+        Some(0.5),
+    );
+    let cmd = build_command(&spec, GpuId(0), 8123, None);
+    let args = args(&cmd);
+
+    let bare_count = args
+        .iter()
+        .filter(|a| *a == "--gpu-memory-utilization")
+        .count();
+    assert_eq!(bare_count, 0, "no auto-injected bare flag, got {args:?}");
+    assert!(args.iter().any(|a| a == "--gpu-memory-utilization=0.7"));
+}
+
+#[test]
+fn non_vllm_engines_ignore_max_vram_fraction() {
+    for engine in [EngineType::LlamaCpp, EngineType::Sglang, EngineType::Mock] {
+        let spec = spec_with_engine_and_vram_fraction(engine.clone(), vec![], Some(0.5));
+        let cmd = build_command(&spec, GpuId(0), 8123, None);
+        let args = args(&cmd);
+        assert!(
+            !args.iter().any(|a| a == "--gpu-memory-utilization"),
+            "engine {engine:?} should not receive --gpu-memory-utilization, got {args:?}"
+        );
+    }
+}
+
+#[test]
+fn vllm_without_max_vram_fraction_does_not_inject_flag() {
+    let spec = spec_with_engine_and_vram_fraction(EngineType::Vllm, vec![], None);
+    let cmd = build_command(&spec, GpuId(0), 8123, None);
+    let args = args(&cmd);
+    assert!(!args.iter().any(|a| a == "--gpu-memory-utilization"));
 }
 
 #[test]

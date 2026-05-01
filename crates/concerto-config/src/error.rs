@@ -39,4 +39,11 @@ pub enum ConfigError {
     /// `routing.port_range_start` is not strictly less than `port_range_end`.
     #[error("invalid port range: start ({start}) must be strictly less than end ({end})")]
     InvalidPortRange { start: u16, end: u16 },
+
+    /// `max_vram_fraction` on a model is outside the open range `(0.0, 1.0]`,
+    /// or is NaN.
+    #[error(
+        "invalid max_vram_fraction on model {model}: {value} (must be in (0.0, 1.0] and not NaN)"
+    )]
+    InvalidVramFraction { model: String, value: f64 },
 }

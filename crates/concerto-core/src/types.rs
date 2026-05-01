@@ -93,6 +93,21 @@ pub struct ModelSpec {
     /// If true, the model is protected from eviction regardless of policy.
     #[serde(default)]
     pub pin: bool,
+    /// Per-model VRAM budget as a fraction of the GPU's total memory, in the
+    /// open range `(0.0, 1.0]`.
+    ///
+    /// **vLLM-specific.** When set on a model whose [`engine`](Self::engine)
+    /// is [`EngineType::Vllm`], Concerto translates this to the
+    /// `--gpu-memory-utilization <x>` flag at backend launch. For all other
+    /// engines (`LlamaCpp`, `Sglang`, `Custom`, `Mock`) the field is silently
+    /// ignored at launch time, but a warning is logged at config load so a
+    /// misconfiguration is visible.
+    ///
+    /// If [`engine_args`](Self::engine_args) already contains
+    /// `--gpu-memory-utilization`, the explicit `engine_args` value wins and
+    /// `max_vram_fraction` is ignored (with a load-time warning).
+    #[serde(default)]
+    pub max_vram_fraction: Option<f64>,
 }
 
 /// Which inference engine to use for a model.

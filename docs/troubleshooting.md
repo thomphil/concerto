@@ -87,7 +87,7 @@ Verify the new range is clean with `ss -tln | awk '{print $4}' | grep -oP ':\K\d
 
 **Cause:** vLLM defaults to `--gpu-memory-utilization=0.90`, which reserves 90% of the GPU's total VRAM for that single instance regardless of the model's actual weight footprint. The reservation includes a generously-sized KV cache that vLLM grows aggressively. Concerto's `vram_required` accounting is correct for the weights, but vLLM is not honouring it.
 
-**Fix:** override the default per model in `concerto.toml` so each instance reserves only its share of the GPU:
+**Fix:** set the first-class `max_vram_fraction` field per model in `concerto.toml`. Concerto validates it at config load (range `(0.0, 1.0]`, NaN rejected) and translates it to `--gpu-memory-utilization <x>` at vLLM launch:
 
 ```toml
 [[models]]
@@ -95,11 +95,11 @@ id = "qwen2.5-0.5b"
 name = "Qwen 2.5 0.5B"
 weight_path = "/srv/models/qwen2.5-0.5b"
 vram_required = "2GB"
-engine = "VLLM"
-engine_args = ["--gpu-memory-utilization", "0.5"]
+engine = "vllm"
+max_vram_fraction = 0.5
 ```
 
-Pick a fraction that divides the GPU between the models you intend to co-locate (`0.5` for two equal-sized models, `0.3` for three, etc.). Sprint 3 §A.6 (optional) may promote this to a first-class `max_vram_fraction` field so Concerto can compute the flag itself.
+Pick a fraction that divides the GPU between the models you intend to co-locate (`0.5` for two equal-sized models, `0.3` for three, etc.). The previous `engine_args = ["--gpu-memory-utilization", "0.5"]` form still works and takes precedence if both are set; the field is silently ignored on non-vLLM engines (with a load-time warning).
 
 ## I SIGKILL'd Concerto and now there's a python process holding GPU memory
 

@@ -18,6 +18,7 @@ fn spec(id: &str) -> ModelSpec {
         engine: EngineType::Mock,
         engine_args: vec![],
         pin: false,
+        max_vram_fraction: None,
     }
 }
 

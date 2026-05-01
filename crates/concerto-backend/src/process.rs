@@ -318,6 +318,17 @@ pub(crate) fn default_health_path(engine: &EngineType) -> String {
     }
 }
 
+/// Returns true iff `engine_args` already contains the
+/// `--gpu-memory-utilization` flag (either as a separate token or as
+/// `--gpu-memory-utilization=<value>`).
+///
+/// When this is true, [`build_command`] suppresses auto-injection from
+/// `spec.max_vram_fraction` so the user's explicit value wins.
+fn engine_args_specifies_gpu_memory_utilization(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--gpu-memory-utilization" || a.starts_with("--gpu-memory-utilization="))
+}
+
 /// Resolve the Python interpreter for engines that launch via `python -m …`.
 ///
 /// If `python_override` is provided, use that directly. Otherwise checks
@@ -362,6 +373,14 @@ pub fn build_command(
                 "--port",
                 &port_str,
             ]);
+            // Inject --gpu-memory-utilization from `max_vram_fraction` unless
+            // the user has already specified it explicitly in `engine_args`,
+            // in which case the explicit value wins.
+            if let Some(fraction) = spec.max_vram_fraction {
+                if !engine_args_specifies_gpu_memory_utilization(&spec.engine_args) {
+                    c.args(["--gpu-memory-utilization", &format!("{fraction}")]);
+                }
+            }
             c
         }
         EngineType::LlamaCpp => {
