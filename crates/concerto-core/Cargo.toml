@@ -2,6 +2,8 @@
 name = "concerto-core"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Pure routing logic, eviction policies, and memory accounting for Concerto. Zero IO dependencies."
 
 [dependencies]
