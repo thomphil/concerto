@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0-dev"
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thomphil/concerto"
@@ -61,14 +61,11 @@ nix = { version = "0.29", features = ["signal", "process"] }
 # Testing
 proptest = "1"
 
-# Internal crates. Path deps must also carry a `version` for `cargo publish`
-# to rewrite them to registry deps; the version is set on the release
-# branch (where workspace.version is the actual release version) so that
-# the SemVer constraint matches what's about to be published. Leaving it
-# off here on `main` (which sits at `0.2.0-dev`) keeps the workspace
-# resolvable while we develop.
-concerto-core = { path = "crates/concerto-core" }
-concerto-gpu = { path = "crates/concerto-gpu" }
-concerto-backend = { path = "crates/concerto-backend" }
-concerto-api = { path = "crates/concerto-api" }
-concerto-config = { path = "crates/concerto-config" }
+# Internal crates. Version pin is required so `cargo publish` rewrites
+# path deps to registry deps. This is the release branch — pin to the
+# release version line.
+concerto-core = { path = "crates/concerto-core", version = "0.1" }
+concerto-gpu = { path = "crates/concerto-gpu", version = "0.1" }
+concerto-backend = { path = "crates/concerto-backend", version = "0.1" }
+concerto-api = { path = "crates/concerto-api", version = "0.1" }
+concerto-config = { path = "crates/concerto-config", version = "0.1" }
